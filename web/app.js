@@ -224,7 +224,7 @@ async function loadIntegrations() {
   const form = $('#subscription-form');
   if (!provider.configured) {
     status.className = 'integration-status warn';
-    status.innerHTML = `<strong>${esc(provider.title)} no está configurado.</strong> Crea una clave gratuita en the-odds-api.com y define la variable <code>${esc(provider.api_key_env)}</code> antes de iniciar el servidor:<br><code>$env:${esc(provider.api_key_env)} = "tu-clave"; python server.py</code>`;
+    status.innerHTML = `<strong>${esc(provider.title)} no está configurado.</strong> Falta la clave de API en el servidor. Crea una clave gratuita en the-odds-api.com y agrégala como variable <code>${esc(provider.api_key_env)}</code> en la configuración del servidor (en Docker, en las variables de entorno del proyecto) y reinícialo.`;
   } else {
     const st = provider.status || {};
     const remaining = st.requests_remaining ?? null;
