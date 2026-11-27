@@ -8,7 +8,7 @@ archivo se envía al modelo en cada pregunta.
 -->
 
 ## Qué es Cuotas Claro
-Cuotas Claro es una herramienta web para encontrar cuotas. El usuario registra las cuotas decimales de cada resultado de un evento deportivo, de una o varias casas de apuestas, y el panel calcula si el mercado completo tiene "underround". Avisa cuando la suma de probabilidades implícitas llega al umbral del usuario (98% por defecto). Lema: "Fuentes visibles. Cálculos claros. Tú decides cuándo actuar." No es una casa de apuestas: no recibe apuestas ni dinero y no da recomendaciones de apuesta. Es gratis.
+Cuotas Claro es una herramienta web para encontrar surebets (arbitraje): el mismo evento en distintas casas de apuestas, tomando la mejor cuota de cada resultado, con una suma de probabilidades implícitas MENOR a 100%. Una sola casa siempre suma más de 100% (es su margen); combinando casas a veces baja de 100%, y entonces el sistema calcula cuánto apostar en cada casa para ganar lo mismo sin importar el resultado. El usuario registra las cuotas a mano o las importa por API, y recibe una alerta cuando la suma llega a su umbral (98% por defecto). Lema: "Fuentes visibles. Cálculos claros. Tú decides cuándo actuar." No es una casa de apuestas: no recibe apuestas ni dinero y no da recomendaciones de apuesta. Es gratis.
 acciones: crear_cuenta, como_empezar, explicar_calculo
 
 ## Cómo empezar
@@ -24,9 +24,19 @@ acciones: crear_cuenta, nuevo_evento, ir_eventos
 - Para cada resultado se toma la MEJOR cuota vigente entre todas las casas.
 - Se suman las probabilidades implícitas de todos los resultados del mercado.
 - Underround teórico = 100% − suma. Ejemplo: cuotas 3.2, 3.6 y 3.4 → 31.25% + 27.78% + 29.41% = 88.44%, underround 11.56%.
-- Si la suma es menor o igual a tu umbral, el mercado aparece como "Umbral alcanzado" y se genera una alerta.
+- Si la suma es menor a 100% hay surebet y el panel muestra el reparto sugerido. Si además es menor o igual a tu umbral, aparece "Umbral alcanzado" y se genera una alerta.
 - Una suma mayor a 100% es lo normal: es el margen de las casas.
 acciones: ir_eventos, ir_ajustes
+
+## Reparto de apuestas: cuánto apostar en cada casa
+- Solo para usuarios con sesión iniciada: aparece en la tarjeta de cada evento con suma menor a 100%, en el correo de alerta y en este chat.
+- Tú defines el monto total a apostar (por defecto $1,000) y el redondeo de cada apuesta, de $1 a $10 (por defecto $1), en "Umbral, vigencia y reparto".
+- Fórmula: apuesta en cada resultado = monto × (1/cuota) / suma. Así el pago es igual gane quien gane.
+- Ejemplo con $1,000: Tigres 2.10 en Casa 1 y América 2.05 en Casa 2 (suma 96.40%) → $494 a Tigres en Casa 1 y $506 a América en Casa 2; cualquiera que gane cobras unos $1,037, ganancia mínima de $37.30.
+- El redondeo se elige para maximizar la ganancia mínima sin pasarte del monto. Si el monto es muy bajo, el sistema avisa que no se garantiza ganancia.
+- En la tarjeta puedes cambiar el monto y pulsar "Recalcular".
+- Riesgos: las cuotas cambian rápido, algunas casas limitan o cierran cuentas que hacen arbitraje y, si una casa anula una apuesta, la otra queda descubierta. Coloca todas las apuestas casi al mismo tiempo.
+acciones: ver_reparto, ir_ajustes, explicar_calculo
 
 ## Cuotas vigentes, reemplazadas y vencidas
 - De cada casa solo cuenta la captura más reciente por resultado; las anteriores quedan como "Reemplazada". La casa se reconoce sin importar mayúsculas ni espacios.
@@ -48,11 +58,12 @@ acciones: nuevo_evento, ir_eventos
 - Si el servidor no tiene SMTP configurado, la alerta queda "pendiente" y se ve en el panel.
 acciones: ir_correo, ir_ajustes
 
-## Umbral y vigencia
-- Umbral de alerta: entre 50% y 100% (por defecto 98%). Un umbral más bajo da menos alertas, pero más exigentes.
+## Umbral, vigencia y reparto
+- Umbral de alerta: entre 50% y 98% (por defecto 98%). El máximo es 98% para dejar al menos 2% de margen de seguridad. Un umbral más bajo da menos alertas, pero con más ganancia.
 - Vigencia de cuotas: entre 1 minuto y 7 días (por defecto 60 minutos).
 - Si usas cuotas por API, la vigencia debe ser igual o mayor al intervalo de sincronización (120 minutos) para que no venzan entre una sincronización y otra.
-- Se cambian en la sección "Umbral y vigencia" del panel.
+- Monto total a apostar y redondeo ($1 a $10) para el reparto.
+- Se cambian en la sección "Umbral, vigencia y reparto" del panel.
 acciones: ir_ajustes
 
 ## Cuotas por API
@@ -73,7 +84,8 @@ acciones: iniciar_sesion, crear_cuenta
 
 ## Advertencias: garantías, ganancias y juego responsable
 - Un underround teórico no garantiza que las cuotas sigan disponibles, que se acepten todas las apuestas ni que exista una ganancia neta.
-- Las casas pueden cambiar cuotas, limitar montos, anular apuestas o cobrar comisiones (los exchanges cobran comisión).
+- Las cuotas cambian rápido, algunas casas limitan o cierran cuentas que hacen arbitraje y, si una casa anula una apuesta, la otra queda descubierta: coloca todas las apuestas casi al mismo tiempo.
+- Las casas pueden limitar montos o cobrar comisiones (los exchanges cobran comisión).
 - Verifica siempre la cuota en la casa antes de decidir. Cuotas Claro solo calcula: no asesora ni garantiza resultados.
 - Apuesta solo si eres mayor de edad y de forma responsable.
 acciones: explicar_calculo

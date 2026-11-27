@@ -120,6 +120,16 @@ class AssistantTest(ServerBase):
             self.assertEqual(chat(self.client, "hola")[0], 200)
             self.assertEqual(chat(self.client, "hola")[0], 429)
 
+    def test_guest_cannot_get_stake_plan(self):
+        chat(self.client, "¿cuánto apuesto en cada casa?")
+        system = FakeOllama.requests[-1]["messages"][0]["content"]
+        self.assertIn("SOLO para usuarios con sesión", system)
+        self.assertIn("NO calcules montos", system)
+        answer = assistant.fallback_answer("¿cuánto apuesto en cada casa?", False)
+        ids = [b["id"] for b in answer["buttons"]]
+        self.assertNotIn("ver_reparto", ids)
+        self.assertIn("iniciar_sesion", ids)
+
     def test_empty_question_rejected(self):
         self.assertEqual(chat(self.client, "   ")[0], 400)
 
@@ -150,6 +160,8 @@ class KnowledgeTest(ServerBase):
             "quiero seguir la liga mx automáticamente": "Cuotas por API",
             "¿garantiza ganancias?": "Advertencias",
             "olvidé mi contraseña": "Cuenta, contraseña",
+            "¿cuánto apuesto en cada casa?": "Reparto de apuestas",
+            "¿a cuánto redondea el monto?": "Reparto de apuestas",
         }
         for question, title in cases.items():
             self.assertIn(title, assistant.fallback_answer(question, False)["text"], question)
