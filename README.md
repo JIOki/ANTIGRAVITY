@@ -39,6 +39,32 @@ python server.py
 - `ssl` (puerto 465 por defecto): SSL implícito. `SMTP_USE_SSL=true` sigue funcionando como equivalente.
 - `none`: sin cifrado, solo para un relay local; en este modo nunca se envían credenciales. El MVP solo envía una alerta cuando cambia la combinación de mejores cuotas; si el correo falla, deja la alerta como pendiente para revisión en el panel. No se debe exponer el servidor directamente a internet sin HTTPS, almacenamiento persistente de sesiones, límites de intentos y una revisión de seguridad.
 
+## Cuotas por API (The Odds API)
+
+Además de la captura manual, el panel puede seguir deportes completos e importar sus eventos y cuotas del mercado **ganador (h2h)** desde [The Odds API](https://the-odds-api.com). Las cuotas importadas y las capturadas a mano se combinan en el mismo cálculo, así que puedes completar a mano las casas que el proveedor no cubre (por ejemplo, Caliente o Codere MX).
+
+1. Crea una clave en the-odds-api.com (el plan gratuito da 500 créditos al mes).
+2. Inicia el servidor con la clave en una variable de entorno; nunca la guardes en el repositorio:
+
+   ```powershell
+   $env:ODDS_API_KEY = "tu-clave"
+   python server.py
+   ```
+
+3. En el panel, en **Cuotas por API**, elige un deporte o liga y las regiones de casas, y luego usa **Sincronizar ahora**.
+
+Cómo funciona:
+
+- Cada sincronización hace **una llamada por combinación de deporte y regiones**, aunque varias cuentas sigan lo mismo. Cuesta 1 crédito por región. El panel muestra los créditos restantes y un consumo mensual estimado.
+- La sincronización automática corre cada `ODDS_API_INTERVAL_MINUTES` (120 por defecto, mínimo 5) y solo trae eventos que empiezan dentro de `ODDS_API_HORIZON_HOURS` (72 por defecto). Los eventos ya iniciados no se importan.
+- Si una cuota no cambió, solo se renueva su hora de observación, sin duplicar el historial. Si cambió, se guarda como una captura nueva.
+- Para que las cuotas de la API no venzan entre sincronizaciones, la vigencia de tu cuenta debe ser mayor o igual al intervalo; el panel avisa cuando no lo es.
+- Solo se combinan casas que publican el mismo conjunto de resultados; por ejemplo, en fútbol se descartan los mercados sin empate.
+- Si eliminas un evento importado, no se vuelve a crear. Sus resultados los define el proveedor y no se pueden editar.
+- Para agregar otro proveedor, implementa `OddsProvider` en `providers.py` y regístralo en `PROVIDERS`.
+
+Las cuotas de exchanges (por ejemplo, Betfair en la región Europa) no descuentan comisión. Revisa siempre la cuota en la casa antes de decidir.
+
 ## Datos
 
 La base SQLite se crea en `data/odds.db`. Los eventos y sus alertas quedan asociados a la cuenta que los creó. Las sesiones se guardan en la misma base (solo el hash SHA-256 del token), duran 7 días y sobreviven a reinicios del servidor; cerrar sesión las invalida. El inicio de sesión se bloquea 15 minutos tras 5 intentos fallidos por correo o 20 por IP, y el registro está limitado a 10 por IP cada 15 minutos. Las bases creadas con la versión anterior se migran solas al iniciar.

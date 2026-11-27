@@ -35,7 +35,7 @@ class Client:
         return response.status, json.loads(data) if data else {}
 
 
-class ServerTest(unittest.TestCase):
+class ServerBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_patch = mock.patch.object(server, "DB_PATH", Path(self.tmp.name) / "odds.db")
@@ -76,6 +76,8 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         return data["events"][index]["calculation"]
 
+
+class ServerTest(ServerBase):
     # 1. vigencia de cuotas
     def test_alert_and_calculation(self):
         self.register()
