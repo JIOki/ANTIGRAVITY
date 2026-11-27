@@ -2,13 +2,17 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const authView = $('#auth-view');
 const dashboard = $('#dashboard');
 const authForm = $('#auth-form');
+const eventDialog = $('#event-dialog');
+const eventForm = $('#event-form');
 let authMode = 'login';
 let eventsCache = [];
+let editingEventId = null;
 
 async function api(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Ocurrió un error.');
+  let data = {};
+  try { data = await response.json(); } catch { /* respuesta sin JSON */ }
+  if (!response.ok) throw new Error(data.error || `Ocurrió un error (${response.status}).`);
   return data;
 }
 function toast(message) {
@@ -18,6 +22,18 @@ function toast(message) {
 function esc(value) {
   return String(value).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
 }
+function fmtPercent(value) { return `${Number(value).toFixed(2).replace(/\.00$/, '')}%`; }
+function fmtAge(minutes) {
+  if (minutes < 1) return 'hace <1 min';
+  if (minutes < 60) return `hace ${Math.round(minutes)} min`;
+  if (minutes < 1440) return `hace ${(minutes / 60).toFixed(1)} h`;
+  return `hace ${(minutes / 1440).toFixed(1)} d`;
+}
+function applySettings(settings) {
+  document.querySelectorAll('.threshold-text').forEach(el => { el.textContent = fmtPercent(settings.threshold_percent); });
+  $('#max-age-text').textContent = settings.max_age_minutes;
+}
+
 function setMode(mode) {
   authMode = mode;
   document.querySelectorAll('.auth-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.mode === mode));
@@ -42,26 +58,65 @@ $('#logout').addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST', body: '{}' });
   dashboard.classList.add('hidden'); authView.classList.remove('hidden'); $('#logout').classList.add('hidden');
 });
-$('#new-event-button').addEventListener('click', () => $('#event-dialog').showModal());
-$('#empty-new-event').addEventListener('click', () => $('#event-dialog').showModal());
-$('#event-form').addEventListener('submit', async event => {
+
+function openEventDialog(eventData = null) {
+  editingEventId = eventData ? eventData.id : null;
+  eventForm.reset();
+  $('#event-error').textContent = '';
+  $('#dialog-eyebrow').textContent = eventData ? 'EDITAR MERCADO' : 'NUEVO MERCADO';
+  $('#dialog-title').textContent = eventData ? 'Edita el evento' : 'Registra un evento';
+  $('#dialog-help').textContent = eventData
+    ? 'Si quitas un resultado, también se borran las cuotas capturadas para él.'
+    : 'Escribe todos los resultados posibles de este mercado para calcularlo correctamente.';
+  $('#save-event').textContent = eventData ? 'Guardar cambios' : 'Crear evento';
+  if (eventData) {
+    eventForm.elements.name.value = eventData.name;
+    eventForm.elements.sport.value = eventData.sport;
+    eventForm.elements.market.value = eventData.market;
+    eventForm.elements.outcomes.value = eventData.outcomes.join(', ');
+    eventForm.elements.starts_at.value = eventData.starts_at;
+  }
+  eventDialog.showModal();
+}
+$('#new-event-button').addEventListener('click', () => openEventDialog());
+$('#empty-new-event').addEventListener('click', () => openEventDialog());
+eventForm.addEventListener('submit', async event => {
   if (event.submitter?.value === 'cancel') return;
   event.preventDefault();
-  const form = event.currentTarget;
-  const values = Object.fromEntries(new FormData(form));
+  const values = Object.fromEntries(new FormData(eventForm));
   values.outcomes = values.outcomes.split(',').map(value => value.trim()).filter(Boolean);
   $('#event-error').textContent = '';
   try {
-    await api('/api/events', { method: 'POST', body: JSON.stringify(values) });
-    form.reset(); $('#event-dialog').close(); await loadEvents(); toast('Evento agregado. Ahora captura sus cuotas.');
+    if (editingEventId) {
+      const result = await api(`/api/events/${editingEventId}`, { method: 'PUT', body: JSON.stringify(values) });
+      toast(result.removed_odds ? `Evento actualizado · ${result.removed_odds} cuota(s) eliminadas` : 'Evento actualizado.');
+    } else {
+      await api('/api/events', { method: 'POST', body: JSON.stringify(values) });
+      toast('Evento agregado. Ahora captura sus cuotas.');
+    }
+    eventDialog.close(); await loadEvents();
   } catch (error) { $('#event-error').textContent = error.message; }
 });
+
 $('#email-form').addEventListener('submit', async event => {
   event.preventDefault();
   try {
     await api('/api/profile', { method: 'POST', body: JSON.stringify({ alert_email: $('#alert-email').value }) });
     $('#email-status').textContent = 'Correo de alertas guardado.'; $('#email-status').style.color = '#187c4b';
   } catch (error) { $('#email-status').textContent = error.message; $('#email-status').style.color = '#ba4b43'; }
+});
+$('#settings-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const status = $('#settings-status');
+  try {
+    const result = await api('/api/profile', { method: 'POST', body: JSON.stringify({
+      threshold_percent: Number($('#threshold-input').value),
+      max_age_minutes: Number($('#max-age-input').value),
+    }) });
+    applySettings(result);
+    status.textContent = 'Ajustes guardados.'; status.style.color = '#187c4b';
+    await loadEvents();
+  } catch (error) { status.textContent = error.message; status.style.color = '#ba4b43'; }
 });
 
 async function addOdds(eventId, card) {
@@ -74,26 +129,58 @@ async function addOdds(eventId, card) {
     else toast('Cuota guardada.');
   } catch (error) { toast(error.message); }
 }
+async function deleteEvent(eventData) {
+  if (!confirm(`¿Eliminar "${eventData.name}" con todas sus cuotas y alertas?`)) return;
+  try { await api(`/api/events/${eventData.id}`, { method: 'DELETE' }); await loadEvents(); toast('Evento eliminado.'); }
+  catch (error) { toast(error.message); }
+}
+async function deleteOdds(eventId, oddsId) {
+  if (!confirm('¿Eliminar esta captura de cuota?')) return;
+  try { await api(`/api/events/${eventId}/odds/${oddsId}`, { method: 'DELETE' }); await loadEvents(); toast('Cuota eliminada.'); }
+  catch (error) { toast(error.message); }
+}
+
+function renderHistory(event) {
+  const rows = event.calculation.history;
+  if (!rows.length) return '';
+  const body = rows.map(row => {
+    const state = !row.current ? 'Reemplazada' : row.fresh ? 'Vigente' : 'Vencida';
+    const cls = !row.current ? 'is-old' : row.fresh ? '' : 'is-stale';
+    return `<tr class="${cls}"><td>${esc(row.outcome)}</td><td>${esc(row.bookmaker)}</td><td>${esc(row.decimal_odds)}</td><td>${fmtAge(row.age_minutes)}</td><td>${state}</td><td><button class="link-button" type="button" data-delete-odds="${row.id}">Eliminar</button></td></tr>`;
+  }).join('');
+  return `<details class="history"><summary>Historial de capturas (${rows.length})</summary><table><thead><tr><th>Resultado</th><th>Casa</th><th>Cuota</th><th>Capturada</th><th>Estado</th><th></th></tr></thead><tbody>${body}</tbody></table></details>`;
+}
+
 function renderEvent(event) {
   const calc = event.calculation;
   const card = document.createElement('article'); card.className = 'event-card';
   const startText = event.starts_at ? ` · ${esc(event.starts_at.replace('T', ' '))}` : '';
-  let tableRows = event.outcomes.map(outcome => {
+  const tableRows = event.outcomes.map(outcome => {
     const quote = calc.best_odds[outcome];
-    return `<tr><td>${esc(outcome)}</td><td class="${quote ? 'odds-best' : ''}">${quote ? esc(quote.decimal_odds) : '—'}</td><td>${quote ? esc(quote.bookmaker) : 'Sin cuota'}</td><td>${quote ? new Date(quote.observed_at).toLocaleString('es-MX') : '—'}</td></tr>`;
+    const stale = calc.stale_outcomes.includes(outcome);
+    return `<tr><td>${esc(outcome)}</td><td class="${quote ? 'odds-best' : ''}">${quote ? esc(quote.decimal_odds) : '—'}</td><td>${quote ? esc(quote.bookmaker) : stale ? 'Solo cuotas vencidas' : 'Sin cuota'}</td><td>${quote ? `${new Date(quote.observed_at).toLocaleString('es-MX')} (${fmtAge(quote.age_minutes)})` : '—'}</td></tr>`;
   }).join('');
   const alert = event.alerts[0];
-  const alertNote = alert ? `<div class="alert-note ${alert.status !== 'sent' ? 'pending' : ''}">${alert.status === 'sent' ? '✓ Correo enviado' : '◷ Correo pendiente'} · ${esc(alert.message)} (${(alert.probability_sum * 100).toFixed(2)}%)</div>` : '';
-  card.innerHTML = `<div class="event-header"><div><h3 class="event-title">${esc(event.name)}</h3><div class="event-meta">${esc(event.sport || 'Deporte sin especificar')}${startText}</div></div><span class="market-badge">${esc(event.market)}</span></div>
-    <div class="calc-strip"><div><div class="calc-label">Suma de probabilidades implícitas</div><div class="calc-value ${calc.qualifies ? 'good' : calc.complete ? '' : 'wait'}">${calc.probability_percent === null ? '—' : `${calc.probability_percent.toFixed(2)}%`}</div><div class="calc-sub">${calc.complete ? `Underround teórico: ${calc.underround_percent.toFixed(2)}%` : 'Faltan resultados para completar el mercado'}</div></div><span class="status-pill ${calc.qualifies ? 'good' : calc.complete ? '' : 'incomplete'}">${calc.qualifies ? 'Umbral alcanzado' : calc.complete ? 'En seguimiento' : 'Incompleto'}</span></div>
-    <div class="odds-table-wrap"><table class="odds-table"><thead><tr><th>RESULTADO</th><th>MEJOR CUOTA</th><th>CASA</th><th>CAPTURADA</th></tr></thead><tbody>${tableRows}</tbody></table></div>
-    ${alertNote}<form class="capture-row"><label>Resultado<select name="outcome" required>${event.outcomes.map(outcome => `<option value="${esc(outcome)}">${esc(outcome)}</option>`).join('')}</select></label><label>Casa<input name="bookmaker" required placeholder="Casa de juego"></label><label>Cuota decimal<input name="decimal_odds" type="number" min="1.01" max="100000" step="0.01" required placeholder="2.10"></label><button class="button button-secondary" type="submit">Guardar cuota</button></form>`;
-  $('.capture-row', card).addEventListener('submit', eventSubmit => { eventSubmit.preventDefault(); addOdds(event.id, card); });
+  const alertNote = alert ? `<div class="alert-note ${alert.status !== 'sent' ? 'pending' : ''}">${alert.status === 'sent' ? '✓ Correo enviado' : '◷ Alerta pendiente'} · ${esc(alert.message)} (${(alert.probability_sum * 100).toFixed(2)}%)</div>` : '';
+  const staleNote = calc.ignored_count ? `<div class="stale-note">Se ignoraron ${calc.ignored_count} cuota(s) con más de ${calc.max_age_minutes} min de antigüedad. Vuelve a capturarlas para usarlas.</div>` : '';
+  const validUntil = calc.valid_until ? ` · válido hasta ${new Date(calc.valid_until).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}` : '';
+  const pending = calc.stale_outcomes.length ? 'Faltan cuotas vigentes para completar el mercado' : 'Faltan resultados para completar el mercado';
+  card.innerHTML = `<div class="event-header"><div><h3 class="event-title">${esc(event.name)}</h3><div class="event-meta">${esc(event.sport || 'Deporte sin especificar')}${startText}</div><div class="event-actions"><button class="button button-quiet button-small" type="button" data-action="edit">Editar</button><button class="button button-quiet button-small button-danger" type="button" data-action="delete">Eliminar</button></div></div><span class="market-badge">${esc(event.market)}</span></div>
+    <div class="calc-strip"><div><div class="calc-label">Suma de probabilidades implícitas</div><div class="calc-value ${calc.qualifies ? 'good' : calc.complete ? '' : 'wait'}">${calc.probability_percent === null ? '—' : `${calc.probability_percent.toFixed(2)}%`}</div><div class="calc-sub">${calc.complete ? `Underround teórico: ${calc.underround_percent.toFixed(2)}%${validUntil}` : pending}</div></div><span class="status-pill ${calc.qualifies ? 'good' : calc.complete ? '' : 'incomplete'}">${calc.qualifies ? 'Umbral alcanzado' : calc.complete ? 'En seguimiento' : 'Incompleto'}</span></div>
+    <div class="odds-table-wrap"><table class="odds-table"><thead><tr><th>RESULTADO</th><th>MEJOR CUOTA VIGENTE</th><th>CASA</th><th>CAPTURADA</th></tr></thead><tbody>${tableRows}</tbody></table></div>
+    ${staleNote}${alertNote}<form class="capture-row"><label>Resultado<select name="outcome" required>${event.outcomes.map(outcome => `<option value="${esc(outcome)}">${esc(outcome)}</option>`).join('')}</select></label><label>Casa<input name="bookmaker" required placeholder="Casa de juego"></label><label>Cuota decimal<input name="decimal_odds" type="number" min="1.01" max="100000" step="0.01" required placeholder="2.10"></label><button class="button button-secondary" type="submit">Guardar cuota</button></form>${renderHistory(event)}`;
+  $('.capture-row', card).addEventListener('submit', submitEvent => { submitEvent.preventDefault(); addOdds(event.id, card); });
+  $('[data-action="edit"]', card).addEventListener('click', () => openEventDialog(event));
+  $('[data-action="delete"]', card).addEventListener('click', () => deleteEvent(event));
+  card.querySelectorAll('[data-delete-odds]').forEach(button => button.addEventListener('click', () => deleteOdds(event.id, button.dataset.deleteOdds)));
   return card;
 }
 async function loadEvents() {
+  const openHistories = new Set([...document.querySelectorAll('.event-card details[open]')].map(el => el.closest('.event-card').dataset.id));
   const data = await api('/api/events'); eventsCache = data.events;
-  const list = $('#events-list'); list.replaceChildren(...eventsCache.map(renderEvent));
+  applySettings(data);
+  const cards = eventsCache.map(event => { const card = renderEvent(event); card.dataset.id = event.id; if (openHistories.has(String(event.id))) $('details', card)?.setAttribute('open', ''); return card; });
+  $('#events-list').replaceChildren(...cards);
   $('#empty-state').classList.toggle('hidden', eventsCache.length > 0);
   $('#stat-events').textContent = eventsCache.length;
   $('#stat-complete').textContent = eventsCache.filter(event => event.calculation.complete).length;
@@ -103,6 +190,9 @@ async function showDashboard() {
   try {
     const me = await api('/api/me');
     $('#alert-email').value = me.alert_email;
+    $('#threshold-input').value = Number(me.threshold_percent.toFixed(2));
+    $('#max-age-input').value = me.max_age_minutes;
+    applySettings(me);
     authView.classList.add('hidden'); dashboard.classList.remove('hidden'); $('#logout').classList.remove('hidden');
     await loadEvents();
   } catch { dashboard.classList.add('hidden'); authView.classList.remove('hidden'); $('#logout').classList.add('hidden'); }
