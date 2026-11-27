@@ -1,0 +1,38 @@
+# Despliegue en el VPS: crea /opt/cuotas-claro, clona el repo en /opt/cuotas-claro/app
+# (o lo actualiza con git pull al reiniciar) y guarda la base en /opt/cuotas-claro/data.
+services:
+  app:
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /opt/cuotas-claro
+    environment:
+      ODDS_HOST: 0.0.0.0
+      ODDS_PORT: "8000"
+      ODDS_DB_PATH: /opt/cuotas-claro/data/odds.db
+      ODDS_TRUST_PROXY: "true"
+      ODDS_SECURE_COOKIE: "true"
+      GIT_REPO: https://github.com/JIOki/ANTIGRAVITY.git
+      GIT_BRANCH: ${GIT_BRANCH:-main}
+      ODDS_API_KEY: ${ODDS_API_KEY:-}
+      ODDS_API_INTERVAL_MINUTES: ${ODDS_API_INTERVAL_MINUTES:-120}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+    volumes:
+      - /opt/cuotas-claro:/opt/cuotas-claro
+    ports:
+      - "127.0.0.1:8010:8000"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apt-get update -qq && apt-get install -y -qq git ca-certificates >/dev/null
+        if [ -d app/.git ]; then git -C app fetch -q origin "$$GIT_BRANCH" && git -C app checkout -q "$$GIT_BRANCH" && git -C app reset -q --hard "origin/$$GIT_BRANCH";
+        else git clone -q -b "$$GIT_BRANCH" "$$GIT_REPO" app; fi
+        mkdir -p data
+        echo "Desplegado: $$(git -C app log -1 --format='%h %s')"
+        exec python -u app/server.py

@@ -35,6 +35,11 @@ THRESHOLD_RANGE = (0.50, 1.00)
 MAX_AGE_RANGE = (1, 10080)  # de 1 minuto a 7 días
 
 SESSION_TTL = timedelta(days=7)
+# Detrás de un proxy inverso (Nginx), usa la IP real del cliente enviada en X-Real-IP.
+TRUST_PROXY = os.environ.get("ODDS_TRUST_PROXY", "false").lower() == "true"
+# Añade el atributo Secure a la cookie de sesión (actívalo cuando el sitio se sirva por HTTPS).
+SECURE_COOKIE = os.environ.get("ODDS_SECURE_COOKIE", "false").lower() == "true"
+COOKIE_FLAGS = "Path=/; HttpOnly; SameSite=Strict" + ("; Secure" if SECURE_COOKIE else "")
 MAX_BODY_BYTES = 100_000
 
 # Límites de intentos de autenticación (ventana deslizante).
@@ -560,6 +565,13 @@ class App(BaseHTTPRequestHandler):
             raise RequestError(400, "Se esperaba un objeto JSON.")
         return value
 
+    def client_ip(self) -> str:
+        if TRUST_PROXY:
+            real_ip = (self.headers.get("X-Real-IP") or "").strip()
+            if real_ip:
+                return real_ip[:64]
+        return self.client_address[0]
+
     def session_token(self) -> str | None:
         morsel = SimpleCookie(self.headers.get("Cookie", "")).get("odds_session")
         return morsel.value if morsel else None
@@ -665,7 +677,7 @@ class App(BaseHTTPRequestHandler):
             if token:
                 with DB_LOCK, open_db() as db:
                     db.execute("DELETE FROM sessions WHERE token_hash=?", (hash_token(token),))
-            reply(self, 200, {"ok": True}, {"Set-Cookie": "odds_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"})
+            reply(self, 200, {"ok": True}, {"Set-Cookie": f"odds_session=; {COOKIE_FLAGS}; Max-Age=0"})
             return
         if path == "/api/profile":
             self.update_profile(data)
@@ -757,7 +769,7 @@ class App(BaseHTTPRequestHandler):
         password = str(data.get("password", ""))
         if len(email) > 254 or "@" not in email or len(password) < 10 or len(password) > 1024:
             raise RequestError(400, "Ingresa un correo válido y una contraseña de 10 a 1024 caracteres.")
-        ip_key = f"ip:{self.client_address[0]}"
+        ip_key = f"ip:{self.client_ip()}"
         with DB_LOCK, open_db() as db:
             if register:
                 if count_attempts(db, f"register:{ip_key}") >= REGISTER_PER_IP:
@@ -789,7 +801,7 @@ class App(BaseHTTPRequestHandler):
                 user_id = user["id"]
             token = create_session(db, user_id)
         max_age = int(SESSION_TTL.total_seconds())
-        reply(self, 200, {"ok": True}, {"Set-Cookie": f"odds_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"})
+        reply(self, 200, {"ok": True}, {"Set-Cookie": f"odds_session={token}; {COOKIE_FLAGS}; Max-Age={max_age}"})
 
     def update_profile(self, data: dict) -> None:
         with DB_LOCK, open_db() as db:

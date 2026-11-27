@@ -151,6 +151,16 @@ class ServerTest(ServerBase):
         status, _ = other.request("POST", "/api/login", {"email": "ana@example.com", "password": "contrasena-segura"})
         self.assertEqual(status, 429)
 
+    def test_rate_limit_uses_real_ip_behind_proxy(self):
+        self.register()
+        with mock.patch.object(server, "TRUST_PROXY", True):
+            attacker = Client(self.port)
+            for _ in range(server.LOGIN_FAILS_PER_IP):
+                attacker.request("POST", "/api/login", {"email": f"x{_}@example.com", "password": "incorrecta-123"}, headers={"X-Real-IP": "203.0.113.9"})
+            blocked, _ = attacker.request("POST", "/api/login", {"email": "ana@example.com", "password": "contrasena-segura"}, headers={"X-Real-IP": "203.0.113.9"})
+            ok, _ = Client(self.port).request("POST", "/api/login", {"email": "ana@example.com", "password": "contrasena-segura"}, headers={"X-Real-IP": "198.51.100.7"})
+        self.assertEqual((blocked, ok), (429, 200))
+
     def test_duplicate_register_is_generic(self):
         self.register()
         status, data = Client(self.port).request("POST", "/api/register", {"email": "ana@example.com", "password": "otra-contrasena"})

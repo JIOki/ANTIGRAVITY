@@ -65,6 +65,26 @@ Cómo funciona:
 
 Las cuotas de exchanges (por ejemplo, Betfair en la región Europa) no descuentan comisión. Revisa siempre la cuota en la casa antes de decidir.
 
+## Despliegue en VPS (Docker + Nginx)
+
+`deploy/docker-compose.yml` levanta el servidor en un contenedor `python:3.12-slim`. Al arrancar, clona el repo en `/opt/cuotas-claro/app` o lo actualiza a la última versión de `GIT_BRANCH` (main por defecto); la base de datos queda fuera del código, en `/opt/cuotas-claro/data`. El puerto solo se publica en `127.0.0.1:8010`, así que el acceso público pasa siempre por Nginx con HTTPS.
+
+Para actualizar después de hacer push basta con reiniciar el contenedor.
+
+En el VPS (una sola vez), con `deploy/nginx-cuotasclaro.conf`:
+
+```bash
+sudo cp /opt/cuotas-claro/app/deploy/nginx-cuotasclaro.conf /etc/nginx/sites-available/cuotasclaro.ponlopallevar.com
+sudo ln -s /etc/nginx/sites-available/cuotasclaro.ponlopallevar.com /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d cuotasclaro.ponlopallevar.com
+```
+
+Variables de producción ya incluidas en el compose:
+
+- `ODDS_TRUST_PROXY=true`: toma la IP real de `X-Real-IP` para los límites de intentos. Actívala solo detrás de un proxy, porque el cliente podría falsificar ese encabezado.
+- `ODDS_SECURE_COOKIE=true`: la cookie de sesión solo viaja por HTTPS.
+
 ## Datos
 
 La base SQLite se crea en `data/odds.db`. Los eventos y sus alertas quedan asociados a la cuenta que los creó. Las sesiones se guardan en la misma base (solo el hash SHA-256 del token), duran 7 días y sobreviven a reinicios del servidor; cerrar sesión las invalida. El inicio de sesión se bloquea 15 minutos tras 5 intentos fallidos por correo o 20 por IP, y el registro está limitado a 10 por IP cada 15 minutos. Las bases creadas con la versión anterior se migran solas al iniciar.
