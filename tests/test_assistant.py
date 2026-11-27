@@ -162,6 +162,7 @@ class KnowledgeTest(ServerBase):
             "olvidé mi contraseña": "Cuenta, contraseña",
             "¿cuánto apuesto en cada casa?": "Reparto de apuestas",
             "¿a cuánto redondea el monto?": "Reparto de apuestas",
+            "agregué la cuota de caliente y no aparece": "Cuotas de otra casa",
         }
         for question, title in cases.items():
             self.assertIn(title, assistant.fallback_answer(question, False)["text"], question)

@@ -125,11 +125,13 @@ $('#settings-form').addEventListener('submit', async event => {
 async function addOdds(eventId, card) {
   const form = $('.capture-row', card);
   const values = Object.fromEntries(new FormData(form));
+  const odds = parseOdds(values.decimal_odds);
+  if (!odds) { toast('Cuota inválida: usa decimal (2.10) o momio americano (+290 / -150).'); return; }
   try {
-    const result = await api(`/api/events/${eventId}/odds`, { method: 'POST', body: JSON.stringify({ ...values, decimal_odds: Number(values.decimal_odds) }) });
+    const result = await api(`/api/events/${eventId}/odds`, { method: 'POST', body: JSON.stringify({ bookmaker: values.bookmaker, outcome: values.outcome, decimal_odds: odds }) });
+    form.reset();
     await loadEvents();
-    if (result.alert?.created) toast(`Alerta generada: ${result.alert.probability_percent.toFixed(2)}%${result.alert.status === 'sent' ? ' · correo enviado' : ' · correo pendiente de configurar'}`);
-    else toast('Cuota guardada.');
+    toast(saveMessage(result));
   } catch (error) { toast(error.message); }
 }
 async function deleteEvent(eventData) {
@@ -171,10 +173,11 @@ function renderEvent(event) {
   card.innerHTML = `<div class="event-header"><div><h3 class="event-title">${esc(event.name)}${event.source && event.source !== 'manual' ? `<span class="source-badge">API · ${esc(providerTitle(event.source))}</span>` : ''}</h3><div class="event-meta">${esc(event.sport || 'Deporte sin especificar')}${startText}</div><div class="event-actions"><button class="button button-quiet button-small" type="button" data-action="edit">Editar</button><button class="button button-quiet button-small button-danger" type="button" data-action="delete">Eliminar</button></div></div><span class="market-badge">${esc(event.market)}</span></div>
     <div class="calc-strip"><div><div class="calc-label">Suma de probabilidades implícitas</div><div class="calc-value ${calc.qualifies ? 'good' : calc.complete ? '' : 'wait'}">${calc.probability_percent === null ? '—' : `${calc.probability_percent.toFixed(2)}%`}</div><div class="calc-sub">${calc.complete ? `Underround teórico: ${calc.underround_percent.toFixed(2)}%${validUntil}` : pending}</div></div><span class="status-pill ${calc.qualifies ? 'good' : calc.complete ? '' : 'incomplete'}">${calc.qualifies ? 'Umbral alcanzado' : calc.complete ? 'En seguimiento' : 'Incompleto'}</span></div>
     <div class="odds-table-wrap"><table class="odds-table"><thead><tr><th>RESULTADO</th><th>MEJOR CUOTA VIGENTE</th><th>CASA</th><th>CAPTURADA</th></tr></thead><tbody>${tableRows}</tbody></table></div>
-    ${staleNote}${renderStakes(event)}${alertNote}<form class="capture-row"><label>Resultado<select name="outcome" required>${event.outcomes.map(outcome => `<option value="${esc(outcome)}">${esc(outcome)}</option>`).join('')}</select></label><label>Casa<input name="bookmaker" required placeholder="Casa de juego"></label><label>Cuota decimal<input name="decimal_odds" type="number" min="1.01" max="100000" step="0.01" required placeholder="2.10"></label><button class="button button-secondary" type="submit">Guardar cuota</button></form>${renderHistory(event)}`;
+    ${staleNote}${renderStakes(event)}${alertNote}<form class="capture-row"><label>Resultado<select name="outcome" required>${event.outcomes.map(outcome => `<option value="${esc(outcome)}">${esc(outcome)}</option>`).join('')}</select></label><label>Casa<input name="bookmaker" required placeholder="Casa de juego"></label><label>Cuota<input name="decimal_odds" type="text" inputmode="decimal" autocomplete="off" required placeholder="2.10 o +290" title="Cuota decimal (2.10) o momio americano (+290 / -150)"></label><button class="button button-secondary" type="submit">Guardar cuota</button></form><div class="card-actions-row"><button class="button button-primary button-small" type="button" data-action="house">＋ Cuotas de otra casa</button></div>${renderComparison(event)}${renderHistory(event)}`;
   $('.capture-row', card).addEventListener('submit', submitEvent => { submitEvent.preventDefault(); addOdds(event.id, card); });
   $('.stake-form', card)?.addEventListener('submit', submitEvent => { submitEvent.preventDefault(); recalcStakes(event, card); });
   $('[data-action="edit"]', card).addEventListener('click', () => openEventDialog(event));
+  $('[data-action="house"]', card).addEventListener('click', () => openHouseDialog(event));
   $('[data-action="delete"]', card).addEventListener('click', () => deleteEvent(event));
   card.querySelectorAll('[data-delete-odds]').forEach(button => button.addEventListener('click', () => deleteOdds(event.id, button.dataset.deleteOdds)));
   return card;
@@ -324,3 +327,88 @@ async function recalcStakes(event, card) {
     else toast('Este mercado ya no tiene cuotas vigentes suficientes para un reparto.');
   } catch (error) { toast(error.message); }
 }
+
+// ------------------------------------------------- captura y comparativa
+// Acepta cuota decimal (2.10, "2,10") o momio americano (+290, -150) y devuelve la cuota decimal.
+function parseOdds(raw) {
+  const text = String(raw ?? '').trim().replace(/\s+/g, '').replace(/[−–]/g, '-').replace(',', '.');
+  if (!text) return null;
+  if (/^[+-]\d{3,}(\.\d+)?$/.test(text)) {
+    const american = Number(text);
+    const decimal = american > 0 ? 1 + american / 100 : 1 + 100 / Math.abs(american);
+    return Math.round(decimal * 10000) / 10000;
+  }
+  if (/^[+-]/.test(text)) return null; // un momio americano necesita al menos 3 dígitos (+150, -110)
+  const decimal = Number(text);
+  return Number.isFinite(decimal) && decimal > 1 && decimal <= 100000 ? decimal : null;
+}
+function saveMessage(result) {
+  if (result.alert?.created) return `Alerta generada: ${result.alert.probability_percent.toFixed(2)}% · revisa el reparto en la tarjeta`;
+  const parts = (result.saved || []).map(item => item.is_best
+    ? `${item.outcome} ${item.decimal_odds} es la nueva mejor cuota`
+    : `${item.outcome} ${item.decimal_odds} (la mejor sigue siendo ${item.best_bookmaker} ${item.best_odds})`);
+  return `${result.bookmaker} guardada: ${parts.join(' · ')}`;
+}
+function renderComparison(event) {
+  const latest = event.calculation.history.filter(row => row.current);
+  const houses = [...new Map(latest.map(row => [row.bookmaker.trim().toLowerCase(), row.bookmaker])).entries()];
+  if (houses.length < 1) return '';
+  const best = event.calculation.best_odds;
+  const rows = houses.map(([key, name]) => {
+    const cells = event.outcomes.map(outcome => {
+      const quote = latest.find(row => row.outcome === outcome && row.bookmaker.trim().toLowerCase() === key);
+      if (!quote) return '<td class="cmp-empty">—</td>';
+      const isBest = best[outcome] && best[outcome].id === quote.id;
+      const cls = [isBest ? 'cmp-best' : '', quote.fresh ? '' : 'cmp-stale'].join(' ').trim();
+      const title = quote.fresh ? `Capturada ${fmtAge(quote.age_minutes)}` : `Vencida (${fmtAge(quote.age_minutes)})`;
+      return `<td class="${cls}" title="${esc(title)}">${esc(quote.decimal_odds)}</td>`;
+    }).join('');
+    const manual = latest.some(row => row.bookmaker.trim().toLowerCase() === key && row.source === 'manual');
+    return { manual, html: `<tr><th scope="row">${esc(name)}${manual ? ' <span class="cmp-tag">Manual</span>' : ''}</th>${cells}</tr>` };
+  });
+  rows.sort((a, b) => Number(b.manual) - Number(a.manual));
+  const head = event.outcomes.map(outcome => `<th>${esc(outcome)}</th>`).join('');
+  return `<details class="history comparison"${houses.length <= 8 ? ' open' : ''}><summary>Comparativa por casa (${houses.length})</summary>
+    <div class="cmp-wrap"><table class="cmp-table"><thead><tr><th>Casa</th>${head}</tr></thead><tbody>${rows.map(r => r.html).join('')}</tbody></table></div>
+    <p class="cmp-legend"><span class="cmp-best-dot"></span> Mejor cuota vigente de cada resultado (la que usa el cálculo) · <span class="cmp-stale-dot"></span> vencida, no se usa</p></details>`;
+}
+let houseEvent = null;
+function openHouseDialog(event) {
+  houseEvent = event;
+  const form = $('#house-form');
+  form.reset();
+  $('#house-error').textContent = '';
+  $('#house-title').textContent = `Cuotas de otra casa · ${event.name}`;
+  $('#house-outcomes').innerHTML = event.outcomes.map((outcome, index) => {
+    const best = event.calculation.best_odds[outcome];
+    return `<label>${esc(outcome)}<input name="o${index}" type="text" inputmode="decimal" autocomplete="off" placeholder="${best ? `mejor actual ${esc(best.decimal_odds)}` : '2.10 o +290'}"><span class="house-preview" data-preview="${index}"></span></label>`;
+  }).join('');
+  $('#house-outcomes').querySelectorAll('input').forEach(input => input.addEventListener('input', () => {
+    const odds = parseOdds(input.value);
+    const preview = input.parentElement.querySelector('.house-preview');
+    preview.textContent = !input.value.trim() ? '' : odds ? (String(odds) !== input.value.trim() ? `= ${odds}` : '') : 'cuota inválida';
+    preview.classList.toggle('bad', Boolean(input.value.trim()) && !odds);
+  }));
+  $('#house-dialog').showModal();
+  form.elements.bookmaker.focus();
+}
+$('#house-form').addEventListener('submit', async submitEvent => {
+  if (submitEvent.submitter?.value === 'cancel') return;
+  submitEvent.preventDefault();
+  const form = $('#house-form');
+  const quotes = [];
+  for (const [index, outcome] of houseEvent.outcomes.entries()) {
+    const raw = form.elements[`o${index}`].value;
+    if (!raw.trim()) continue;
+    const odds = parseOdds(raw);
+    if (!odds) { $('#house-error').textContent = `Cuota inválida para ${outcome}: usa 2.10 o +290 / -150.`; return; }
+    quotes.push({ outcome, decimal_odds: odds });
+  }
+  if (!quotes.length) { $('#house-error').textContent = 'Escribe al menos una cuota.'; return; }
+  try {
+    const result = await api(`/api/events/${houseEvent.id}/odds`, { method: 'POST', body: JSON.stringify({ bookmaker: form.elements.bookmaker.value, quotes }) });
+    $('#house-dialog').close();
+    await loadEvents();
+    toast(saveMessage(result));
+  } catch (error) { $('#house-error').textContent = error.message; }
+});

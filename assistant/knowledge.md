@@ -38,6 +38,15 @@ acciones: ir_eventos, ir_ajustes
 - Riesgos: las cuotas cambian rápido, algunas casas limitan o cierran cuentas que hacen arbitraje y, si una casa anula una apuesta, la otra queda descubierta. Coloca todas las apuestas casi al mismo tiempo.
 acciones: ver_reparto, ir_ajustes, explicar_calculo
 
+## Cuotas de otra casa y comparativa por casa
+- Para agregar cuotas de otra casa (por ejemplo Caliente) a un partido que ya existe, NO se crea un evento nuevo: se usa la tarjeta de ese partido.
+- Botón "＋ Cuotas de otra casa" en la tarjeta: escribes la casa y la cuota de cada resultado de una sola vez. También está la fila rápida para capturar un resultado.
+- Acepta cuotas decimales (2.10) o momios americanos: +290 → 3.90 y −150 → 1.67; se convierten solos.
+- Al guardar, el sistema avisa si tu cuota es la nueva mejor o cuál casa sigue teniendo la mejor.
+- La "Comparativa por casa" de cada tarjeta muestra todas las casas en filas y los resultados en columnas; en verde, la mejor cuota vigente de cada resultado (la que usa el cálculo); tachadas, las vencidas. Las capturas manuales llevan la etiqueta "Manual".
+- Si tu cuota no aparece en la tabla de mejores cuotas es porque otra casa paga más; sí se guardó y aparece en la comparativa.
+acciones: ir_eventos, explicar_calculo
+
 ## Cuotas vigentes, reemplazadas y vencidas
 - De cada casa solo cuenta la captura más reciente por resultado; las anteriores quedan como "Reemplazada". La casa se reconoce sin importar mayúsculas ni espacios.
 - Una cuota más antigua que tu vigencia (60 minutos por defecto) queda "Vencida" y se ignora en el cálculo; hay que volver a capturarla.
