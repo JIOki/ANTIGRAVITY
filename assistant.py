@@ -18,6 +18,7 @@ KNOWLEDGE_PATH = ROOT / "assistant" / "knowledge.md"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
+OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "6144"))
 ASSISTANT_ENABLED = os.environ.get("ASSISTANT_AI", "true").lower() == "true"
 # Ollama en CPU atiende una respuesta a la vez; las demás esperan o usan el respaldo.
 OLLAMA_SLOTS = threading.BoundedSemaphore(int(os.environ.get("OLLAMA_CONCURRENCY", "2")))
@@ -36,12 +37,14 @@ ACTIONS: dict[str, dict] = {
     "ir_eventos": {"label": "Ver mis eventos", "action": "goto:events-list", "user": True},
     "ir_api": {"label": "Ir a Cuotas por API", "action": "goto:integrations-panel", "user": True},
     "ir_correo": {"label": "Configurar correo", "action": "goto:email-form", "user": True},
-    "ir_ajustes": {"label": "Umbral y vigencia", "action": "goto:settings-form", "user": True},
+    "ir_ajustes": {"label": "Umbral, vigencia y reparto", "action": "goto:settings-form", "user": True},
+    "ver_reparto": {"label": "Ver reparto en mis eventos", "action": "goto:events-list", "user": True},
     "sincronizar": {"label": "Sincronizar ahora", "action": "sync_now", "user": True},
     "como_empezar": {"label": "¿Cómo empiezo?", "prompt": "¿Cómo empiezo a usar Cuotas Claro?"},
     "explicar_calculo": {"label": "¿Cómo se calcula?", "prompt": "¿Cómo se calcula el underround?"},
     "explicar_vencidas": {"label": "Cuotas vencidas", "prompt": "¿Qué es una cuota vencida?"},
     "explicar_api": {"label": "¿Qué es Cuotas por API?", "prompt": "¿Cómo funcionan las cuotas por API?"},
+    "explicar_reparto": {"label": "¿Cuánto apuesto en cada casa?", "prompt": "¿Cómo calcula el sistema cuánto apostar en cada casa?"},
     "sitio_odds_api": {"label": "Sitio de The Odds API ↗", "href": "https://the-odds-api.com"},
 }
 
@@ -55,14 +58,16 @@ KEYWORD_ACTIONS = [
     (("correo", "email", "mail", "notific", "aviso"), ["ir_correo"]),
     (("umbral", "vigencia", "ajuste", "98", "minutos"), ["ir_ajustes"]),
     (("vencid", "reemplazad", "antigua", "vieja"), ["explicar_vencidas", "ir_ajustes"]),
-    (("calcul", "underround", "probabilidad", "suma", "formula", "margen", "surebet", "arbitraje"), ["explicar_calculo"]),
+    (("cuanto apost", "cuanto le apuest", "reparto", "repartir", "monto", "redonde", "surebet", "arbitraje", "cuanto poner", "cuanto meto"),
+     ["ver_reparto", "explicar_reparto"]),
+    (("calcul", "underround", "probabilidad", "suma", "formula", "margen"), ["explicar_calculo"]),
     (("empez", "comenz", "como uso", "como funciona", "primer"), ["como_empezar"]),
 ]
 
-GREETING = ("¡Hola! Soy el asistente de **Cuotas Claro**. Te ayudo a registrar eventos, entender el cálculo de "
-            "probabilidades implícitas, configurar alertas y conectar cuotas por API. ¿Qué quieres hacer?")
-GREETING_ACTIONS_GUEST = ["como_empezar", "explicar_calculo", "explicar_api", "crear_cuenta"]
-GREETING_ACTIONS_USER = ["nuevo_evento", "explicar_calculo", "ir_api", "ir_ajustes"]
+GREETING = ("¡Hola! Soy el asistente de **Cuotas Claro**. Te ayudo a encontrar surebets: registrar eventos de varias casas, "
+            "entender el cálculo, saber cuánto apostar en cada casa, configurar alertas y conectar cuotas por API. ¿Qué quieres hacer?")
+GREETING_ACTIONS_GUEST = ["como_empezar", "explicar_calculo", "explicar_reparto", "crear_cuenta"]
+GREETING_ACTIONS_USER = ["nuevo_evento", "ver_reparto", "explicar_reparto", "ir_api"]
 
 
 @dataclass
@@ -197,8 +202,13 @@ def fallback_answer(question: str, logged_in: bool, reason: str = "") -> dict:
 
 def system_prompt(logged_in: bool, user_context: str) -> str:
     allowed = [k for k in ACTIONS if available(k, logged_in)]
-    who = ("El usuario YA inició sesión; puedes guiarlo dentro de su panel." if logged_in
-           else "El usuario es un visitante sin sesión; para usar el panel debe crear una cuenta o iniciar sesión.")
+    who = ("El usuario YA inició sesión; puedes guiarlo dentro de su panel. Si pregunta cuánto apostar, usa EXACTAMENTE los "
+           "repartos que aparecen en el CONTEXTO DEL USUARIO (no los recalcules ni inventes cifras); para otro monto, dile que lo "
+           "cambie en la tarjeta del evento y pulse \"Recalcular\" o en \"Umbral, vigencia y reparto\". Si un evento no aparece con "
+           "reparto, explica por qué (incompleto o suma de 100% o más). Siempre que des un reparto, agrega la advertencia de riesgos."
+           if logged_in else
+           "El usuario es un visitante sin sesión. El cálculo de cuánto apostar en cada casa (reparto) es SOLO para usuarios con "
+           "sesión: si lo pide, NO calcules montos; explica que debe crear una cuenta o iniciar sesión para obtenerlo.")
     return f"""Eres el asistente oficial de Cuotas Claro. Respondes SIEMPRE en español de México, con tono amable, claro y breve (máximo 120 palabras), usando viñetas o pasos numerados cuando ayuden.
 
 Reglas:
@@ -233,7 +243,7 @@ def stream_ollama(messages: list[dict]) -> Iterator[str]:
         "messages": messages,
         "stream": True,
         "keep_alive": "30m",
-        "options": {"temperature": 0.3, "num_ctx": 4096, "num_predict": 350},
+        "options": {"temperature": 0.3, "num_ctx": OLLAMA_NUM_CTX, "num_predict": 400},
     }).encode()
     request = Request(f"{OLLAMA_URL}/api/chat", data=payload, headers={"Content-Type": "application/json"})
     with urlopen(request, timeout=OLLAMA_TIMEOUT) as response:

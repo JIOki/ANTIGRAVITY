@@ -112,6 +112,8 @@ $('#settings-form').addEventListener('submit', async event => {
     const result = await api('/api/profile', { method: 'POST', body: JSON.stringify({
       threshold_percent: Number($('#threshold-input').value),
       max_age_minutes: Number($('#max-age-input').value),
+      stake_amount: Number($('#stake-amount-input').value),
+      rounding_step: Number($('#rounding-input').value),
     }) });
     applySettings(result);
     status.textContent = 'Ajustes guardados.'; status.style.color = '#187c4b';
@@ -169,8 +171,9 @@ function renderEvent(event) {
   card.innerHTML = `<div class="event-header"><div><h3 class="event-title">${esc(event.name)}${event.source && event.source !== 'manual' ? `<span class="source-badge">API · ${esc(providerTitle(event.source))}</span>` : ''}</h3><div class="event-meta">${esc(event.sport || 'Deporte sin especificar')}${startText}</div><div class="event-actions"><button class="button button-quiet button-small" type="button" data-action="edit">Editar</button><button class="button button-quiet button-small button-danger" type="button" data-action="delete">Eliminar</button></div></div><span class="market-badge">${esc(event.market)}</span></div>
     <div class="calc-strip"><div><div class="calc-label">Suma de probabilidades implícitas</div><div class="calc-value ${calc.qualifies ? 'good' : calc.complete ? '' : 'wait'}">${calc.probability_percent === null ? '—' : `${calc.probability_percent.toFixed(2)}%`}</div><div class="calc-sub">${calc.complete ? `Underround teórico: ${calc.underround_percent.toFixed(2)}%${validUntil}` : pending}</div></div><span class="status-pill ${calc.qualifies ? 'good' : calc.complete ? '' : 'incomplete'}">${calc.qualifies ? 'Umbral alcanzado' : calc.complete ? 'En seguimiento' : 'Incompleto'}</span></div>
     <div class="odds-table-wrap"><table class="odds-table"><thead><tr><th>RESULTADO</th><th>MEJOR CUOTA VIGENTE</th><th>CASA</th><th>CAPTURADA</th></tr></thead><tbody>${tableRows}</tbody></table></div>
-    ${staleNote}${alertNote}<form class="capture-row"><label>Resultado<select name="outcome" required>${event.outcomes.map(outcome => `<option value="${esc(outcome)}">${esc(outcome)}</option>`).join('')}</select></label><label>Casa<input name="bookmaker" required placeholder="Casa de juego"></label><label>Cuota decimal<input name="decimal_odds" type="number" min="1.01" max="100000" step="0.01" required placeholder="2.10"></label><button class="button button-secondary" type="submit">Guardar cuota</button></form>${renderHistory(event)}`;
+    ${staleNote}${renderStakes(event)}${alertNote}<form class="capture-row"><label>Resultado<select name="outcome" required>${event.outcomes.map(outcome => `<option value="${esc(outcome)}">${esc(outcome)}</option>`).join('')}</select></label><label>Casa<input name="bookmaker" required placeholder="Casa de juego"></label><label>Cuota decimal<input name="decimal_odds" type="number" min="1.01" max="100000" step="0.01" required placeholder="2.10"></label><button class="button button-secondary" type="submit">Guardar cuota</button></form>${renderHistory(event)}`;
   $('.capture-row', card).addEventListener('submit', submitEvent => { submitEvent.preventDefault(); addOdds(event.id, card); });
+  $('.stake-form', card)?.addEventListener('submit', submitEvent => { submitEvent.preventDefault(); recalcStakes(event, card); });
   $('[data-action="edit"]', card).addEventListener('click', () => openEventDialog(event));
   $('[data-action="delete"]', card).addEventListener('click', () => deleteEvent(event));
   card.querySelectorAll('[data-delete-odds]').forEach(button => button.addEventListener('click', () => deleteOdds(event.id, button.dataset.deleteOdds)));
@@ -193,6 +196,8 @@ async function showDashboard() {
     $('#alert-email').value = me.alert_email;
     $('#threshold-input').value = Number(me.threshold_percent.toFixed(2));
     $('#max-age-input').value = me.max_age_minutes;
+    $('#stake-amount-input').value = me.stake_amount;
+    $('#rounding-input').value = String(me.rounding_step);
     applySettings(me);
     authView.classList.add('hidden'); dashboard.classList.remove('hidden'); $('#logout').classList.remove('hidden');
     await loadEvents();
@@ -286,3 +291,36 @@ $('#sync-now').addEventListener('click', async () => {
   } catch (error) { toast(error.message); }
   finally { button.textContent = 'Sincronizar ahora'; await loadIntegrations(); }
 });
+
+// ------------------------------------------------------- reparto de apuestas
+let riskWarning = '';
+function money(value) {
+  return `$${Number(value).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+function stakesBody(plan) {
+  if (!plan.feasible) {
+    return `<p class="stake-summary bad">Con ${money(plan.total_requested)} no se puede repartir redondeando a $${plan.rounding_step} sin pasarte del monto. Aumenta el monto o reduce el redondeo.</p>`;
+  }
+  const rows = plan.rows.map(row => `<tr><td><strong>${money(row.stake).replace('.00', '')}</strong></td><td>${esc(row.outcome)}</td><td>${esc(row.bookmaker)}</td><td>${esc(row.decimal_odds)}</td><td>${money(row.payout)}</td><td class="${row.profit > 0 ? 'pos' : 'neg'}">${row.profit > 0 ? '+' : ''}${money(row.profit)}</td></tr>`).join('');
+  const summary = plan.guaranteed
+    ? `Apuestas ${money(plan.total_staked)} y ganas <strong>al menos ${money(plan.min_profit)}</strong> (${plan.min_profit_percent.toFixed(2)}%) sin importar el resultado.`
+    : `Con este monto y redondeo <strong>no se garantiza ganancia</strong> en todos los resultados. Aumenta el monto o reduce el redondeo.`;
+  return `<table class="stake-table"><thead><tr><th>Apuesta</th><th>Resultado</th><th>Casa</th><th>Cuota</th><th>Si gana cobras</th><th>Ganancia</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="stake-summary ${plan.guaranteed ? 'good' : 'bad'}">${summary}</p>`;
+}
+function renderStakes(event) {
+  const plan = event.stakes;
+  if (!plan) return '';
+  return `<section class="stake-box"><div class="stake-head"><div><div class="calc-label">REPARTO SUGERIDO</div><strong>Cuánto apostar en cada casa</strong></div>
+    <form class="stake-form"><label>Monto total<input name="amount" type="number" min="10" max="10000000" step="1" value="${esc(plan.total_requested)}"></label><button class="button button-secondary button-small" type="submit">Recalcular</button></form></div>
+    <div class="stake-body">${stakesBody(plan)}</div>
+    <p class="stake-warning">⚠ ${esc(plan.warning || riskWarning)}</p></section>`;
+}
+async function recalcStakes(event, card) {
+  const amount = Number($('.stake-form input', card).value);
+  try {
+    const { stakes } = await api(`/api/events/${event.id}/stakes?amount=${encodeURIComponent(amount)}`);
+    if (stakes) $('.stake-body', card).innerHTML = stakesBody(stakes);
+    else toast('Este mercado ya no tiene cuotas vigentes suficientes para un reparto.');
+  } catch (error) { toast(error.message); }
+}

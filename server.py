@@ -18,9 +18,10 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import assistant
+import stakes
 from providers import PROVIDERS, ProviderError
 
 ROOT = Path(__file__).resolve().parent
@@ -32,7 +33,9 @@ DB_LOCK = threading.RLock()
 # Valores por defecto de cada cuenta; el usuario puede cambiarlos desde el panel.
 DEFAULT_THRESHOLD = 0.98
 DEFAULT_MAX_AGE_MINUTES = 60
-THRESHOLD_RANGE = (0.50, 1.00)
+THRESHOLD_RANGE = (0.50, 0.98)  # máximo 98%: deja al menos 2% de margen de seguridad
+DEFAULT_STAKE_AMOUNT = 1000.0
+DEFAULT_ROUNDING_STEP = 1
 MAX_AGE_RANGE = (1, 10080)  # de 1 minuto a 7 días
 
 SESSION_TTL = timedelta(days=7)
@@ -65,6 +68,7 @@ LAST_MANUAL_SYNC: dict[int, datetime] = {}
 EVENT_PATH = re.compile(r"^/api/events/(\d+)$")
 ODDS_PATH = re.compile(r"^/api/events/(\d+)/odds$")
 ODDS_ITEM_PATH = re.compile(r"^/api/events/(\d+)/odds/(\d+)$")
+STAKES_PATH = re.compile(r"^/api/events/(\d+)/stakes$")
 SPORTS_PATH = re.compile(r"^/api/integrations/([a-z0-9-]+)/sports$")
 SUBSCRIPTION_PATH = re.compile(r"^/api/integrations/subscriptions/(\d+)$")
 
@@ -198,6 +202,11 @@ def initialize_db() -> None:
             db.execute(f"ALTER TABLE users ADD COLUMN threshold REAL NOT NULL DEFAULT {DEFAULT_THRESHOLD}")
         if "max_age_minutes" not in columns:
             db.execute(f"ALTER TABLE users ADD COLUMN max_age_minutes INTEGER NOT NULL DEFAULT {DEFAULT_MAX_AGE_MINUTES}")
+        if "stake_amount" not in columns:
+            db.execute(f"ALTER TABLE users ADD COLUMN stake_amount REAL NOT NULL DEFAULT {DEFAULT_STAKE_AMOUNT}")
+        if "rounding_step" not in columns:
+            db.execute(f"ALTER TABLE users ADD COLUMN rounding_step INTEGER NOT NULL DEFAULT {DEFAULT_ROUNDING_STEP}")
+        db.execute("UPDATE users SET threshold=? WHERE threshold>?", (THRESHOLD_RANGE[1], THRESHOLD_RANGE[1]))
         event_columns = {row["name"] for row in db.execute("PRAGMA table_info(events)")}
         if "source" not in event_columns:
             db.execute("ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
@@ -335,7 +344,18 @@ def market_calculation(db: sqlite3.Connection, event: sqlite3.Row, threshold: fl
 
 
 def user_settings(db: sqlite3.Connection, user_id: int) -> sqlite3.Row:
-    return db.execute("SELECT email, alert_email, threshold, max_age_minutes FROM users WHERE id=?", (user_id,)).fetchone()
+    return db.execute("SELECT email, alert_email, threshold, max_age_minutes, stake_amount, rounding_step FROM users WHERE id=?",
+                      (user_id,)).fetchone()
+
+
+def settings_payload(settings: sqlite3.Row) -> dict:
+    return {"threshold_percent": settings["threshold"] * 100, "max_age_minutes": settings["max_age_minutes"],
+            "stake_amount": settings["stake_amount"], "rounding_step": settings["rounding_step"]}
+
+
+def stake_plan(calc: dict, settings: sqlite3.Row, amount: float | None = None) -> dict | None:
+    return stakes.calculate_stakes(calc["best_odds"], calc["outcomes"], amount or settings["stake_amount"], settings["rounding_step"]) \
+        if calc["complete"] else None
 
 
 # ------------------------------------------------------------------ alertas
@@ -354,12 +374,12 @@ def evaluate_alert(db: sqlite3.Connection, user_id: int, event: sqlite3.Row) -> 
                else "Oportunidad calculada; agrega un correo personal para recibir alertas.")
     cursor = db.execute("INSERT OR IGNORE INTO alerts(user_id,event_id,fingerprint,probability_sum,status,message) VALUES(?,?,?,?,?,?)",
                         (user_id, event["id"], fingerprint, calc["probability_sum"], "pending", message))
-    return (recipient, dict(event), calc, fingerprint) if cursor.rowcount else None
+    return (recipient, dict(event), calc, fingerprint, stake_plan(calc, settings)) if cursor.rowcount else None
 
 
 def deliver_alert(pending: tuple) -> dict:
     """Envía el correo fuera del candado de la base y actualiza el estado de la alerta."""
-    recipient, event, calc, fingerprint = pending
+    recipient, event, calc, fingerprint, plan = pending
     selections = "\n".join(
         f"- {pick}: {quote['decimal_odds']} ({quote['bookmaker']}, capturada hace {quote['age_minutes']:.0f} min"
         f"{', vía ' + quote['source'] if quote.get('source', 'manual') != 'manual' else ''})"
@@ -367,8 +387,9 @@ def deliver_alert(pending: tuple) -> dict:
     body = (f"Alerta de cuotas para {event['name']}\nMercado: {event['market']}\n"
             f"Suma de probabilidades implícitas: {calc['probability_percent']:.2f}% (umbral {calc['threshold_percent']:.2f}%)\n"
             f"Underround teórico: {calc['underround_percent']:.2f}%\n\nCuotas usadas:\n{selections}\n\n"
-            f"Solo se usaron cuotas con menos de {calc['max_age_minutes']} minutos de antigüedad.\n"
-            "Verifica vigencia, disponibilidad, límites y costos antes de tomar cualquier decisión. El cálculo no garantiza resultados ni ganancias.")
+            + (stakes.format_stakes_text(plan) + "\n\n" if plan else "")
+            + f"Solo se usaron cuotas con menos de {calc['max_age_minutes']} minutos de antigüedad.\n\n"
+            f"IMPORTANTE: {stakes.RISK_WARNING}\nEl cálculo no garantiza resultados ni ganancias.")
     if recipient:
         sent, message = send_alert_email(recipient, f"Alerta de cuotas ≤ {calc['threshold_percent']:.2f}%: {event['name']}", body)
     else:
@@ -510,11 +531,12 @@ def sync_loop(stop: threading.Event) -> None:
 def assistant_user_context(db: sqlite3.Connection, user_id: int) -> str:
     """Resumen breve de la cuenta para que el asistente pueda guiar al usuario."""
     settings = user_settings(db, user_id)
-    events = db.execute("SELECT * FROM events WHERE user_id=? ORDER BY created_at DESC LIMIT 8", (user_id,)).fetchall()
+    events = db.execute("SELECT * FROM events WHERE user_id=? ORDER BY created_at DESC LIMIT 6", (user_id,)).fetchall()
     total = db.execute("SELECT COUNT(*) FROM events WHERE user_id=?", (user_id,)).fetchone()[0]
     subs = [row["sport_title"] for row in db.execute("SELECT sport_title FROM api_subscriptions WHERE user_id=?", (user_id,))]
     lines = [
-        f"- Umbral: {settings['threshold'] * 100:.2f}%. Vigencia de cuotas: {settings['max_age_minutes']} min.",
+        f"- Umbral: {settings['threshold'] * 100:.2f}%. Vigencia de cuotas: {settings['max_age_minutes']} min. "
+        f"Monto a apostar: ${settings['stake_amount']:,.2f}. Redondeo: ${settings['rounding_step']}.",
         f"- Correo de alertas: {'configurado' if settings['alert_email'] else 'sin configurar'}.",
         f"- Cuotas por API: {'configurado' if any(p.configured for p in PROVIDERS.values()) else 'sin clave en el servidor'}; "
         f"deportes seguidos: {', '.join(subs) if subs else 'ninguno'}.",
@@ -524,6 +546,9 @@ def assistant_user_context(db: sqlite3.Connection, user_id: int) -> str:
         calc = market_calculation(db, event, settings["threshold"], settings["max_age_minutes"])
         if calc["complete"]:
             state = f"suma {calc['probability_percent']:.2f}%" + (" (umbral alcanzado)" if calc["qualifies"] else "")
+            plan = stake_plan(calc, settings)
+            if plan:
+                state += "\n    " + stakes.format_stakes_text(plan).replace("\n", "\n    ")
         else:
             missing = [o for o in calc["outcomes"] if o not in calc["best_odds"]]
             state = f"incompleto, faltan cuotas vigentes de: {', '.join(missing)}"
@@ -655,9 +680,7 @@ class App(BaseHTTPRequestHandler):
             user_id = self.require_user(db)
             settings = user_settings(db, user_id)
             if path == "/api/me":
-                reply(self, 200, {"email": settings["email"], "alert_email": settings["alert_email"],
-                                  "threshold_percent": settings["threshold"] * 100,
-                                  "max_age_minutes": settings["max_age_minutes"]})
+                reply(self, 200, {"email": settings["email"], "alert_email": settings["alert_email"], **settings_payload(settings)})
                 return
             if path == "/api/events":
                 events = db.execute("SELECT * FROM events WHERE user_id=? ORDER BY created_at DESC", (user_id,)).fetchall()
@@ -666,12 +689,12 @@ class App(BaseHTTPRequestHandler):
                     item = dict(event)
                     item["outcomes"] = json.loads(item["outcomes"])
                     item["calculation"] = market_calculation(db, event, settings["threshold"], settings["max_age_minutes"])
+                    item["stakes"] = stake_plan(item["calculation"], settings)
                     item["alerts"] = [dict(row) for row in db.execute(
                         "SELECT status, probability_sum, message, created_at FROM alerts WHERE event_id=? "
                         "ORDER BY created_at DESC LIMIT 5", (event["id"],))]
                     items.append(item)
-                reply(self, 200, {"events": items, "threshold_percent": settings["threshold"] * 100,
-                                  "max_age_minutes": settings["max_age_minutes"]})
+                reply(self, 200, {"events": items, **settings_payload(settings), "risk_warning": stakes.RISK_WARNING})
                 return
             if path == "/api/integrations":
                 status = {row["provider"]: dict(row) for row in db.execute("SELECT * FROM integration_status")}
@@ -688,6 +711,22 @@ class App(BaseHTTPRequestHandler):
                                   "interval_minutes": SYNC_INTERVAL_MINUTES, "horizon_hours": SYNC_HORIZON_HOURS,
                                   "estimated_monthly_credits": estimated_monthly_credits(db)})
                 return
+        match = STAKES_PATH.match(path)
+        if match:
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                amount = float(query.get("amount", [""])[0])
+            except ValueError:
+                amount = 0
+            if not stakes.AMOUNT_RANGE[0] <= amount <= stakes.AMOUNT_RANGE[1]:
+                raise RequestError(400, f"El monto debe estar entre ${stakes.AMOUNT_RANGE[0]} y ${stakes.AMOUNT_RANGE[1]:,}.")
+            with DB_LOCK, open_db() as db:
+                event = db.execute("SELECT * FROM events WHERE id=? AND user_id=?", (int(match.group(1)), user_id)).fetchone()
+                if not event:
+                    raise RequestError(404, "Evento no encontrado.")
+                calc = market_calculation(db, event, settings["threshold"], settings["max_age_minutes"])
+                reply(self, 200, {"stakes": stake_plan(calc, settings, amount)})
+            return
         match = SPORTS_PATH.match(path)
         if match:
             provider = PROVIDERS.get(match.group(1))
@@ -855,7 +894,7 @@ class App(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     threshold = -1
                 if not THRESHOLD_RANGE[0] <= threshold <= THRESHOLD_RANGE[1]:
-                    raise RequestError(400, "El umbral debe estar entre 50% y 100%.")
+                    raise RequestError(400, "El umbral debe estar entre 50% y 98%.")
                 settings["threshold"] = round(threshold, 6)
             if "max_age_minutes" in data:
                 try:
@@ -865,10 +904,29 @@ class App(BaseHTTPRequestHandler):
                 if not MAX_AGE_RANGE[0] <= max_age <= MAX_AGE_RANGE[1]:
                     raise RequestError(400, "La vigencia debe estar entre 1 y 10080 minutos (7 días).")
                 settings["max_age_minutes"] = max_age
-            db.execute("UPDATE users SET alert_email=?, threshold=?, max_age_minutes=? WHERE id=?",
-                       (settings["alert_email"], settings["threshold"], settings["max_age_minutes"], user_id))
-        reply(self, 200, {"ok": True, "alert_email": settings["alert_email"],
-                          "threshold_percent": settings["threshold"] * 100, "max_age_minutes": settings["max_age_minutes"]})
+            if "stake_amount" in data:
+                try:
+                    amount = float(data["stake_amount"])
+                except (TypeError, ValueError):
+                    amount = 0
+                if not stakes.AMOUNT_RANGE[0] <= amount <= stakes.AMOUNT_RANGE[1]:
+                    raise RequestError(400, f"El monto debe estar entre ${stakes.AMOUNT_RANGE[0]} y ${stakes.AMOUNT_RANGE[1]:,}.")
+                settings["stake_amount"] = round(amount, 2)
+            if "rounding_step" in data:
+                try:
+                    step = int(data["rounding_step"])
+                except (TypeError, ValueError):
+                    step = 0
+                if not stakes.ROUNDING_RANGE[0] <= step <= stakes.ROUNDING_RANGE[1]:
+                    raise RequestError(400, "El redondeo debe ser de $1 a $10.")
+                settings["rounding_step"] = step
+            db.execute("UPDATE users SET alert_email=?, threshold=?, max_age_minutes=?, stake_amount=?, rounding_step=? WHERE id=?",
+                       (settings["alert_email"], settings["threshold"], settings["max_age_minutes"],
+                        settings["stake_amount"], settings["rounding_step"], user_id))
+            payload = {"ok": True, "alert_email": settings["alert_email"], "threshold_percent": settings["threshold"] * 100,
+                       "max_age_minutes": settings["max_age_minutes"], "stake_amount": settings["stake_amount"],
+                       "rounding_step": settings["rounding_step"]}
+        reply(self, 200, payload)
 
     def assistant_chat(self, data: dict) -> None:
         question = str(data.get("message", "")).strip()

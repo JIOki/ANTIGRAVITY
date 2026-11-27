@@ -215,17 +215,19 @@ class ServerTest(ServerBase):
     def test_threshold_and_max_age_settings(self):
         self.register()
         event_id = self.create_event(("Sí", "No"))
-        self.add(event_id, "Sí", "K1", 2.0)
-        self.add(event_id, "No", "K2", 2.0)  # suma = 100%
-        self.assertFalse(self.calc()["qualifies"])
-        status, _ = self.client.request("POST", "/api/profile", {"threshold_percent": 100, "max_age_minutes": 5})
+        self.add(event_id, "Sí", "K1", 2.06)
+        self.add(event_id, "No", "K2", 2.06)  # suma = 97.09%
+        self.assertTrue(self.calc()["qualifies"])  # umbral por defecto 98%
+        status, _ = self.client.request("POST", "/api/profile", {"threshold_percent": 95, "max_age_minutes": 5})
         self.assertEqual(status, 200)
-        self.assertTrue(self.calc()["qualifies"])
+        self.assertFalse(self.calc()["qualifies"])
         self.age_odds(10)
         self.assertFalse(self.calc()["complete"])
+        # El umbral máximo es 98%: deja 2% de margen de seguridad.
+        self.assertEqual(self.client.request("POST", "/api/profile", {"threshold_percent": 98})[0], 200)
+        self.assertEqual(self.client.request("POST", "/api/profile", {"threshold_percent": 99})[0], 400)
         self.assertEqual(self.client.request("POST", "/api/profile", {"threshold_percent": 120})[0], 400)
         self.assertEqual(self.client.request("POST", "/api/profile", {"max_age_minutes": 0})[0], 400)
-
 
 if __name__ == "__main__":
     unittest.main()

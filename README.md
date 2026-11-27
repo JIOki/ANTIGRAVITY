@@ -39,6 +39,20 @@ python server.py
 - `ssl` (puerto 465 por defecto): SSL implícito. `SMTP_USE_SSL=true` sigue funcionando como equivalente.
 - `none`: sin cifrado, solo para un relay local; en este modo nunca se envían credenciales. El MVP solo envía una alerta cuando cambia la combinación de mejores cuotas; si el correo falla, deja la alerta como pendiente para revisión en el panel. No se debe exponer el servidor directamente a internet sin HTTPS, almacenamiento persistente de sesiones, límites de intentos y una revisión de seguridad.
 
+## Reparto de apuestas (surebet)
+
+Cuando la suma de probabilidades implícitas de un mercado, con la mejor cuota de cada resultado entre casas, es **menor a 100%**, la tarjeta del evento muestra cuánto apostar en cada casa para cobrar lo mismo gane quien gane:
+
+```
+apuesta_i = monto × (1 / cuota_i) / suma      pago = monto / suma
+```
+
+- El **monto total** (por defecto $1,000) y el **redondeo** de cada apuesta ($1 a $10, por defecto $1) se configuran en "Umbral, vigencia y reparto". En la tarjeta se puede probar otro monto con "Recalcular".
+- El redondeo prueba las combinaciones posibles y elige la que **maximiza la ganancia mínima garantizada sin pasarse del monto** (`stakes.py`). Si el monto es muy bajo, avisa que no se garantiza ganancia.
+- El reparto también aparece en el **correo de alerta** y en el **asistente**, solo para usuarios con sesión.
+- El umbral de alerta es configurable con un **máximo de 98%**, que deja 2% de margen de seguridad.
+- Siempre se muestra la advertencia: las cuotas cambian rápido, algunas casas limitan o cierran cuentas que hacen arbitraje y, si una casa anula una apuesta, la otra queda descubierta. Hay que colocar las apuestas casi al mismo tiempo.
+
 ## Cuotas por API (The Odds API)
 
 Además de la captura manual, el panel puede seguir deportes completos e importar sus eventos y cuotas del mercado **ganador (h2h)** desde [The Odds API](https://the-odds-api.com). Las cuotas importadas y las capturadas a mano se combinan en el mismo cálculo, así que puedes completar a mano las casas que el proveedor no cubre (por ejemplo, Caliente o Codere MX).
@@ -82,6 +96,7 @@ Para actualizar lo que sabe el asistente, edita `assistant/knowledge.md`. Cada s
 | `OLLAMA_URL` | `http://ollama:11434` | URL de Ollama |
 | `OLLAMA_MODEL` | `gemma3:4b` | Modelo (si falta, se descarga al arrancar) |
 | `ASSISTANT_AI` | `true` | `false` = solo guía rápida, sin IA |
+| `OLLAMA_NUM_CTX` | `6144` | Contexto del modelo en tokens |
 | `OLLAMA_CONCURRENCY` | `2` | Respuestas con IA simultáneas |
 | `ASSISTANT_MESSAGES_PER_15MIN` | `40` | Límite de mensajes por IP |
 
