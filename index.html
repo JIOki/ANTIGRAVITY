@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101915">
+  <title>Cuotas Claro · Alertas de underround</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/" aria-label="Cuotas Claro inicio"><span class="brand-mark">C</span><span>cuotas<span class="brand-light">claro</span></span></a><div class="top-note"><span class="live-dot"></span> Análisis de cuotas en tiempo real</div><button id="logout" class="button button-quiet hidden" type="button">Cerrar sesión</button></header>
+  <main>
+    <section id="auth-view" class="auth-layout">
+      <div class="hero-copy"><div class="eyebrow">TU PANEL DE MERCADOS</div><h1>Encuentra cuotas<br><em>que merecen atención.</em></h1><p>Registra las cuotas de cada resultado. Te avisamos cuando la suma de probabilidades implícitas sea igual o menor al 98%.</p><div class="hero-proof"><div class="proof-icon">↗</div><span>Fuentes visibles. Cálculos claros.<br><strong>Tú decides cuándo actuar.</strong></span></div></div>
+      <div class="auth-card"><div class="auth-tabs"><button class="auth-tab active" data-mode="login">Iniciar sesión</button><button class="auth-tab" data-mode="register">Crear cuenta</button></div><h2 id="auth-title">Qué bueno verte.</h2><p id="auth-description" class="muted">Ingresa para revisar tus eventos y alertas.</p><form id="auth-form"><label>Correo electrónico<input name="email" type="email" autocomplete="email" required placeholder="tu@correo.com"></label><label>Contraseña<input name="password" type="password" autocomplete="current-password" minlength="10" required placeholder="Mínimo 10 caracteres"></label><button class="button button-primary button-wide" id="auth-submit">Entrar al panel <span>→</span></button><p id="auth-error" class="form-message" role="alert"></p></form><div class="privacy-note"><span>◈</span> Tus eventos son privados para tu cuenta.</div></div>
+    </section>
+    <section id="dashboard" class="hidden">
+      <div class="welcome-row"><div><div class="eyebrow">PANEL DE CONTROL</div><h1>Tu radar de <em>cuotas.</em></h1><p class="muted">Captura cada resultado y el panel calculará el mercado por ti.</p></div><button id="new-event-button" class="button button-primary">＋ Nuevo evento</button></div>
+      <div class="stats-row"><article class="stat-card"><div class="stat-label">EVENTOS EN SEGUIMIENTO</div><div class="stat-value" id="stat-events">0</div><div class="stat-hint">En tu cuenta</div></article><article class="stat-card"><div class="stat-label">MERCADOS COMPLETOS</div><div class="stat-value" id="stat-complete">0</div><div class="stat-hint">Con cuota para cada resultado</div></article><article class="stat-card stat-accent"><div class="stat-label">ALERTAS ≤ 98%</div><div class="stat-value" id="stat-alerts">0</div><div class="stat-hint">Umbral de suma implícita</div></article></div>
+      <section class="panel-section"><div class="section-heading"><div><h2>Eventos en seguimiento</h2><p class="muted">La mejor cuota capturada para cada resultado.</p></div><div class="threshold-badge"><span>UMBRAL DE ALERTA</span><strong>≤ 98%</strong></div></div><div id="events-list" class="events-list"></div><div id="empty-state" class="empty-state"><div class="empty-orbit">◎</div><h3>Tu primer evento empieza aquí</h3><p>Agrega un evento y registra las cuotas de todos sus posibles resultados.</p><button class="button button-secondary" id="empty-new-event">＋ Crear evento</button></div></section>
+      <section class="panel-section settings-panel"><div><h2>Alertas por correo</h2><p class="muted">Cuando un mercado completo llegue al umbral, enviaremos el cálculo y las cuotas utilizadas.</p></div><form id="email-form" class="email-form"><label for="alert-email">Correo personal</label><div class="email-input-row"><input id="alert-email" type="email" placeholder="tu@correo.com"><button class="button button-secondary">Guardar</button></div><div id="email-status" class="form-message" aria-live="polite"></div></form></section>
+      <p class="disclaimer">Un underround teórico no garantiza que las cuotas sigan disponibles, que se acepten todas las apuestas ni que exista una ganancia neta. Revisa límites, comisiones y condiciones.</p>
+    </section>
+  </main>
+  <dialog id="event-dialog"><form id="event-form" method="dialog"><div class="modal-top"><div><div class="eyebrow">NUEVO MERCADO</div><h2>Registra un evento</h2></div><button class="close-button" value="cancel" aria-label="Cerrar">×</button></div><p class="muted">Escribe todos los resultados posibles de este mercado para calcularlo correctamente.</p><label>Evento<input name="name" required placeholder="Ej. Tigres vs. América"></label><div class="form-grid"><label>Deporte<input name="sport" placeholder="Fútbol"></label><label>Mercado<input name="market" required placeholder="Ganador del partido"></label></div><label>Resultados posibles <span class="label-hint">separa cada uno con coma</span><input name="outcomes" required placeholder="Tigres, Empate, América"></label><label>Fecha y hora (opcional)<input name="starts_at" type="datetime-local"></label><div class="modal-actions"><button class="button button-quiet" value="cancel">Cancelar</button><button class="button button-primary" id="save-event" value="default">Crear evento</button></div><p id="event-error" class="form-message" role="alert"></p></form></dialog>
+  <div id="toast" class="toast" role="status"></div>
+</body>
+</html>
