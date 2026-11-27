@@ -979,27 +979,57 @@ class App(BaseHTTPRequestHandler):
         reply(self, 201, {"id": cursor.lastrowid})
 
     def add_odds(self, event_id: int, data: dict) -> None:
-        outcome = str(data.get("outcome", "")).strip()
-        bookmaker = str(data.get("bookmaker", "")).strip()
-        try:
-            decimal_odds = float(data.get("decimal_odds"))
-        except (TypeError, ValueError):
-            decimal_odds = 0
-        if not outcome or not bookmaker or not (1 < decimal_odds <= 100000):
-            raise RequestError(400, "Ingresa resultado, casa y cuota decimal mayor que 1.")
+        """Guarda una cuota ({outcome, decimal_odds}) o varias de la misma casa ({quotes: [...]})."""
+        bookmaker = str(data.get("bookmaker", "")).strip()[:120]
+        raw_quotes = data.get("quotes")
+        if raw_quotes is None:
+            raw_quotes = [{"outcome": data.get("outcome"), "decimal_odds": data.get("decimal_odds")}]
+        if not bookmaker:
+            raise RequestError(400, "Escribe el nombre de la casa.")
+        if not isinstance(raw_quotes, list) or not 1 <= len(raw_quotes) <= 20:
+            raise RequestError(400, "Envía entre 1 y 20 cuotas.")
+        quotes = []
+        for item in raw_quotes:
+            if not isinstance(item, dict):
+                raise RequestError(400, "Cuota inválida.")
+            outcome = str(item.get("outcome", "")).strip()
+            try:
+                decimal_odds = float(item.get("decimal_odds"))
+            except (TypeError, ValueError):
+                decimal_odds = 0
+            if not outcome or not (1 < decimal_odds <= 100000):
+                raise RequestError(400, f"Ingresa una cuota decimal mayor que 1 para {outcome or 'cada resultado'}.")
+            quotes.append((outcome, round(decimal_odds, 4)))
+        if len({o for o, _ in quotes}) != len(quotes):
+            raise RequestError(400, "Hay resultados repetidos.")
         with DB_LOCK, open_db() as db:
             user_id = self.require_user(db)
             event = db.execute("SELECT * FROM events WHERE id=? AND user_id=?", (event_id, user_id)).fetchone()
             if not event:
                 raise RequestError(404, "Evento no encontrado.")
-            if outcome not in json.loads(event["outcomes"]):
-                raise RequestError(400, "El resultado no pertenece a este mercado.")
-            db.execute("INSERT INTO odds(event_id,outcome,bookmaker,decimal_odds,observed_at,source) VALUES(?,?,?,?,?,'manual')",
-                       (event_id, outcome, bookmaker[:120], decimal_odds, iso(utcnow())))
+            valid = json.loads(event["outcomes"])
+            invalid = [o for o, _ in quotes if o not in valid]
+            if invalid:
+                raise RequestError(400, f"El resultado no pertenece a este mercado: {', '.join(invalid)}.")
+            stamp = iso(utcnow())
+            db.executemany("INSERT INTO odds(event_id,outcome,bookmaker,decimal_odds,observed_at,source) VALUES(?,?,?,?,?,'manual')",
+                           [(event_id, o, bookmaker, q, stamp) for o, q in quotes])
+            settings = user_settings(db, user_id)
+            calc = market_calculation(db, event, settings["threshold"], settings["max_age_minutes"])
+            comparison = []
+            for outcome, odds in quotes:
+                best = calc["best_odds"].get(outcome)
+                comparison.append({
+                    "outcome": outcome, "decimal_odds": odds,
+                    "is_best": bool(best and best["bookmaker"].strip().casefold() == bookmaker.casefold()
+                                    and abs(best["decimal_odds"] - odds) < 1e-9),
+                    "best_bookmaker": best["bookmaker"] if best else None,
+                    "best_odds": best["decimal_odds"] if best else None,
+                })
             pending = evaluate_alert(db, user_id, event)
         alert_response = deliver_alert(pending) if pending else None
-        reply(self, 201, {"ok": True, "alert": alert_response})
-
+        reply(self, 201, {"ok": True, "alert": alert_response, "bookmaker": bookmaker, "saved": comparison,
+                          "probability_percent": calc["probability_percent"]})
 
 def make_server(host: str = HOST, port: int = PORT) -> ThreadingHTTPServer:
     initialize_db()

@@ -122,3 +122,36 @@ class StakeApiTest(ServerBase):
             context = server.assistant_user_context(db, user_id)
         self.assertIn("Apuesta $494 a Tigres en Casa 1", context)
         self.assertIn("Redondeo: $1", context)
+
+
+class BatchCaptureTest(ServerBase):
+    def test_batch_capture_reports_best(self):
+        self.register()
+        event_id = self.create_event(("América", "Empate", "Monterrey"))
+        self.add(event_id, "América", "BetRivers", 2.28)
+        status, data = self.client.request("POST", f"/api/events/{event_id}/odds", {
+            "bookmaker": "Caliente",
+            "quotes": [{"outcome": "América", "decimal_odds": 2.24}, {"outcome": "Empate", "decimal_odds": 3.5},
+                       {"outcome": "Monterrey", "decimal_odds": 3.9}]})
+        self.assertEqual(status, 201, data)
+        saved = {item["outcome"]: item for item in data["saved"]}
+        self.assertFalse(saved["América"]["is_best"])
+        self.assertEqual((saved["América"]["best_bookmaker"], saved["América"]["best_odds"]), ("BetRivers", 2.28))
+        self.assertTrue(saved["Monterrey"]["is_best"])
+        self.assertAlmostEqual(data["probability_percent"], (1 / 2.28 + 1 / 3.5 + 1 / 3.9) * 100)
+
+    def test_batch_validation(self):
+        self.register()
+        event_id = self.create_event(("A", "B"))
+        url = f"/api/events/{event_id}/odds"
+        cases = [
+            {"bookmaker": "", "quotes": [{"outcome": "A", "decimal_odds": 2}]},
+            {"bookmaker": "K", "quotes": []},
+            {"bookmaker": "K", "quotes": [{"outcome": "A", "decimal_odds": 2}, {"outcome": "A", "decimal_odds": 3}]},
+            {"bookmaker": "K", "quotes": [{"outcome": "Z", "decimal_odds": 2}]},
+            {"bookmaker": "K", "quotes": [{"outcome": "A", "decimal_odds": 1}]},
+            {"bookmaker": "K", "quotes": "x"},
+        ]
+        for payload in cases:
+            self.assertEqual(self.client.request("POST", url, payload)[0], 400, payload)
+        self.assertEqual(self.calc()["history"], [])  # nada se guardó a medias
