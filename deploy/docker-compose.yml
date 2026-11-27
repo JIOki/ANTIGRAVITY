@@ -21,10 +21,17 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+      # Asistente: Ollama del mismo VPS (proyecto ollama-23ex), alcanzado por la red de Docker.
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:4b}
+      ASSISTANT_AI: ${ASSISTANT_AI:-true}
     volumes:
       - /opt/cuotas-claro:/opt/cuotas-claro
     ports:
       - "127.0.0.1:8010:8000"
+    networks:
+      - default
+      - ollama
     command:
       - sh
       - -c
@@ -36,3 +43,8 @@ services:
         mkdir -p data
         echo "Desplegado: $$(git -C app log -1 --format='%h %s')"
         exec python -u app/server.py
+
+networks:
+  ollama:
+    external: true
+    name: ollama-23ex_default

@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+import assistant
 from providers import PROVIDERS, ProviderError
 
 ROOT = Path(__file__).resolve().parent
@@ -47,6 +48,7 @@ AUTH_WINDOW = timedelta(minutes=15)
 LOGIN_FAILS_PER_EMAIL = 5
 LOGIN_FAILS_PER_IP = 20
 REGISTER_PER_IP = 10
+CHAT_PER_IP = int(os.environ.get("ASSISTANT_MESSAGES_PER_15MIN", "40"))
 
 SCRYPT = dict(n=2**14, r=8, p=1)
 DUMMY_SALT = secrets.token_bytes(16)
@@ -505,6 +507,30 @@ def sync_loop(stop: threading.Event) -> None:
             print(f"[sync] error: {exc!r}")
 
 
+def assistant_user_context(db: sqlite3.Connection, user_id: int) -> str:
+    """Resumen breve de la cuenta para que el asistente pueda guiar al usuario."""
+    settings = user_settings(db, user_id)
+    events = db.execute("SELECT * FROM events WHERE user_id=? ORDER BY created_at DESC LIMIT 8", (user_id,)).fetchall()
+    total = db.execute("SELECT COUNT(*) FROM events WHERE user_id=?", (user_id,)).fetchone()[0]
+    subs = [row["sport_title"] for row in db.execute("SELECT sport_title FROM api_subscriptions WHERE user_id=?", (user_id,))]
+    lines = [
+        f"- Umbral: {settings['threshold'] * 100:.2f}%. Vigencia de cuotas: {settings['max_age_minutes']} min.",
+        f"- Correo de alertas: {'configurado' if settings['alert_email'] else 'sin configurar'}.",
+        f"- Cuotas por API: {'configurado' if any(p.configured for p in PROVIDERS.values()) else 'sin clave en el servidor'}; "
+        f"deportes seguidos: {', '.join(subs) if subs else 'ninguno'}.",
+        f"- Eventos en la cuenta: {total}." + (" Aún no tiene eventos." if not total else ""),
+    ]
+    for event in events:
+        calc = market_calculation(db, event, settings["threshold"], settings["max_age_minutes"])
+        if calc["complete"]:
+            state = f"suma {calc['probability_percent']:.2f}%" + (" (umbral alcanzado)" if calc["qualifies"] else "")
+        else:
+            missing = [o for o in calc["outcomes"] if o not in calc["best_odds"]]
+            state = f"incompleto, faltan cuotas vigentes de: {', '.join(missing)}"
+        lines.append(f"  • {event['name']} [{event['market']}]: {state}")
+    return "\n".join(lines)
+
+
 def parse_event(data: dict) -> tuple[str, str, str, str, list[str]]:
     name = str(data.get("name", "")).strip()
     sport = str(data.get("sport", "")).strip()
@@ -539,6 +565,8 @@ STATIC = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assistant.js": ("assistant.js", "text/javascript; charset=utf-8"),
+    "/assistant.css": ("assistant.css", "text/css; charset=utf-8"),
 }
 
 
@@ -617,6 +645,12 @@ class App(BaseHTTPRequestHandler):
 
     # -- GET
     def get_api(self, path: str, data: dict) -> None:
+        if path == "/api/assistant":
+            with DB_LOCK, open_db() as db:
+                token = self.session_token()
+                logged_in = bool(token and session_user(db, token))
+            reply(self, 200, assistant.greeting(logged_in))
+            return
         with DB_LOCK, open_db() as db:
             user_id = self.require_user(db)
             settings = user_settings(db, user_id)
@@ -681,6 +715,9 @@ class App(BaseHTTPRequestHandler):
             return
         if path == "/api/profile":
             self.update_profile(data)
+            return
+        if path == "/api/assistant":
+            self.assistant_chat(data)
             return
         if path == "/api/events":
             name, sport, market, starts_at, outcomes = parse_event(data)
@@ -833,6 +870,32 @@ class App(BaseHTTPRequestHandler):
         reply(self, 200, {"ok": True, "alert_email": settings["alert_email"],
                           "threshold_percent": settings["threshold"] * 100, "max_age_minutes": settings["max_age_minutes"]})
 
+    def assistant_chat(self, data: dict) -> None:
+        question = str(data.get("message", "")).strip()
+        if not question:
+            raise RequestError(400, "Escribe una pregunta.")
+        chat_key = f"chat:ip:{self.client_ip()}"
+        with DB_LOCK, open_db() as db:
+            if count_attempts(db, chat_key) >= CHAT_PER_IP:
+                raise RequestError(429, "Hiciste muchas preguntas seguidas. Espera unos minutos e intenta de nuevo.")
+            record_attempt(db, chat_key)
+            token = self.session_token()
+            user_id = session_user(db, token) if token else None
+            context = assistant_user_context(db, user_id) if user_id else ""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")  # Nginx: entregar cada fragmento sin esperar
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            for event in assistant.answer_stream(question, data.get("history"), bool(user_id), context):
+                self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # el visitante cerró el chat
+
     def add_subscription(self, data: dict) -> None:
         provider = PROVIDERS.get(str(data.get("provider", "")))
         sport_key = str(data.get("sport_key", "")).strip()
@@ -887,6 +950,8 @@ def make_server(host: str = HOST, port: int = PORT) -> ThreadingHTTPServer:
 
 if __name__ == "__main__":
     server = make_server()
+    if assistant.ASSISTANT_ENABLED:
+        threading.Thread(target=assistant.ensure_model, daemon=True).start()
     configured = [p.title for p in PROVIDERS.values() if p.configured]
     if configured:
         threading.Thread(target=sync_loop, args=(threading.Event(),), daemon=True).start()

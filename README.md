@@ -65,6 +65,26 @@ Cómo funciona:
 
 Las cuotas de exchanges (por ejemplo, Betfair en la región Europa) no descuentan comisión. Revisa siempre la cuota en la casa antes de decidir.
 
+## Asistente (chatbot)
+
+Todas las vistas, inicio de sesión y panel, tienen un asistente flotante ("¿Te ayudo?") que:
+
+- responde con IA local (**Ollama**, modelo `gemma3:4b` por defecto) a partir de `assistant/knowledge.md`, la base de conocimiento con todo lo que ofrece el sitio;
+- si el usuario inició sesión, conoce el estado de su cuenta (umbral, vigencia, eventos incompletos o en umbral, correo y deportes seguidos) para guiarlo;
+- muestra botones que llevan a cada sección (crear cuenta, nuevo evento, Cuotas por API, umbral y vigencia, correo), sugieren preguntas o abren enlaces;
+- transmite la respuesta mientras se genera (streaming);
+- si Ollama no responde o está ocupado, contesta con la sección más relevante de la base de conocimiento, así que nunca se queda sin respuesta.
+
+Para actualizar lo que sabe el asistente, edita `assistant/knowledge.md`. Cada sección `## ` es un tema y su línea `acciones:` define los botones. Los tests verifican que cada sección del sitio esté cubierta.
+
+| Variable | Por defecto | Uso |
+|---|---|---|
+| `OLLAMA_URL` | `http://ollama:11434` | URL de Ollama |
+| `OLLAMA_MODEL` | `gemma3:4b` | Modelo (si falta, se descarga al arrancar) |
+| `ASSISTANT_AI` | `true` | `false` = solo guía rápida, sin IA |
+| `OLLAMA_CONCURRENCY` | `2` | Respuestas con IA simultáneas |
+| `ASSISTANT_MESSAGES_PER_15MIN` | `40` | Límite de mensajes por IP |
+
 ## Despliegue en VPS (Docker + Nginx)
 
 `deploy/docker-compose.yml` levanta el servidor en un contenedor `python:3.12-slim`. Al arrancar, clona el repo en `/opt/cuotas-claro/app` o lo actualiza a la última versión de `GIT_BRANCH` (main por defecto); la base de datos queda fuera del código, en `/opt/cuotas-claro/data`. El puerto solo se publica en `127.0.0.1:8010`, así que el acceso público pasa siempre por Nginx con HTTPS.
