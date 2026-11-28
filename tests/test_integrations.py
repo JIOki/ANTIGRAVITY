@@ -130,7 +130,8 @@ class SyncTest(ServerBase):
         server.run_sync()
         with sqlite3.connect(server.DB_PATH) as db:
             first = db.execute("SELECT COUNT(*) FROM odds").fetchone()[0]
-            db.execute("UPDATE odds SET observed_at=?", (server.iso(server.utcnow() - timedelta(minutes=50)),))
+            old = server.iso(server.utcnow() - timedelta(minutes=50))
+            db.execute("UPDATE odds SET observed_at=?, confirmed_at=?", (old, old))
         self.payload = sample_payload(self.start, draw_price=3.0)  # cambia una cuota
         server.run_sync()
         with sqlite3.connect(server.DB_PATH) as db:

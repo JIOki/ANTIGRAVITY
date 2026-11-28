@@ -1,7 +1,9 @@
 """Pruebas del reparto de apuestas (surebet)."""
+import http.client
 import sqlite3
 import sys
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -155,3 +157,56 @@ class BatchCaptureTest(ServerBase):
         for payload in cases:
             self.assertEqual(self.client.request("POST", url, payload)[0], 400, payload)
         self.assertEqual(self.calc()["history"], [])  # nada se guardó a medias
+
+
+class HistoryTest(ServerBase):
+    def capture(self, event_id, odds, bookmaker="Caliente"):
+        return self.client.request("POST", f"/api/events/{event_id}/odds", {
+            "bookmaker": bookmaker, "quotes": [{"outcome": o, "decimal_odds": q} for o, q in odds.items()]})
+
+    def test_only_changes_are_recorded(self):
+        self.register()
+        event_id = self.create_event(("Suns", "Mavericks"))
+        _, first = self.capture(event_id, {"Suns": 1.65, "Mavericks": 2.4})
+        self.assertTrue(all(item["changed"] for item in first["saved"]))
+        old = server.iso(server.utcnow() - timedelta(minutes=30))
+        with sqlite3.connect(server.DB_PATH) as db:
+            db.execute("UPDATE odds SET observed_at=?, confirmed_at=?", (old, old))
+        _, second = self.capture(event_id, {"Suns": 1.65, "Mavericks": 2.42})  # Suns igual, Mavericks +0.02
+        changed = {item["outcome"]: item["changed"] for item in second["saved"]}
+        self.assertEqual(changed, {"Suns": False, "Mavericks": True})
+        with sqlite3.connect(server.DB_PATH) as db:
+            rows = db.execute("SELECT outcome, decimal_odds, observed_at, confirmed_at FROM odds ORDER BY id").fetchall()
+        self.assertEqual(len(rows), 3)
+        suns = [r for r in rows if r[0] == "Suns"][0]
+        self.assertEqual(suns[2], old)          # conserva cuándo apareció
+        self.assertGreater(suns[3], old)        # pero se confirmó ahora
+        calc = self.calc()
+        self.assertLess(calc["best_odds"]["Suns"]["age_minutes"], 1)  # vigente por la confirmación
+
+    def test_history_csv(self):
+        self.register()
+        event_id = self.create_event(("Suns", "Mavericks"))
+        self.capture(event_id, {"Suns": 1.65, "Mavericks": 2.4})
+        self.capture(event_id, {"Mavericks": 2.5})
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("GET", f"/api/events/{event_id}/history.csv", headers={"Cookie": self.client.cookie})
+        response = conn.getresponse()
+        text = response.read().decode("utf-8-sig")
+        conn.close()
+        self.assertEqual(response.status, 200)
+        self.assertIn("attachment", response.getheader("Content-Disposition"))
+        lines = text.strip().splitlines()
+        self.assertEqual(lines[0].split(",")[:6], ["evento", "mercado", "inicio_partido", "resultado", "casa", "cuota_decimal"])
+        self.assertEqual(len(lines), 4)
+        self.assertIn("2.5", lines[-1])
+
+    def test_old_rows_get_confirmed_at_on_migration(self):
+        self.register()
+        event_id = self.create_event(("A", "B"))
+        self.capture(event_id, {"A": 2.0})
+        with sqlite3.connect(server.DB_PATH) as db:
+            db.execute("UPDATE odds SET confirmed_at=NULL")
+        server.initialize_db()
+        with sqlite3.connect(server.DB_PATH) as db:
+            self.assertIsNotNone(db.execute("SELECT confirmed_at FROM odds").fetchone()[0])

@@ -145,15 +145,21 @@ async function deleteOdds(eventId, oddsId) {
   catch (error) { toast(error.message); }
 }
 
+function fmtClock(value) {
+  return new Date(value).toLocaleString('es-MX', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
 function renderHistory(event) {
   const rows = event.calculation.history;
   if (!rows.length) return '';
   const body = rows.map(row => {
     const state = !row.current ? 'Reemplazada' : row.fresh ? 'Vigente' : 'Vencida';
     const cls = !row.current ? 'is-old' : row.fresh ? '' : 'is-stale';
-    return `<tr class="${cls}"><td>${esc(row.outcome)}</td><td>${esc(row.bookmaker)}</td><td>${esc(row.decimal_odds)}</td><td>${row.source && row.source !== 'manual' ? 'API' : 'Manual'}</td><td>${fmtAge(row.age_minutes)}</td><td>${state}</td><td><button class="link-button" type="button" data-delete-odds="${row.id}">Eliminar</button></td></tr>`;
+    const confirmed = row.confirmed_at && row.confirmed_at !== row.observed_at ? fmtClock(row.confirmed_at) : '—';
+    return `<tr class="${cls}"><td>${esc(row.outcome)}</td><td>${esc(row.bookmaker)}</td><td>${esc(row.decimal_odds)}</td><td>${row.source && row.source !== 'manual' ? 'API' : 'Manual'}</td><td>${fmtClock(row.observed_at)}</td><td>${confirmed}</td><td>${state}</td><td><button class="link-button" type="button" data-delete-odds="${row.id}">Eliminar</button></td></tr>`;
   }).join('');
-  return `<details class="history"><summary>Historial de capturas (${rows.length})</summary><table><thead><tr><th>Resultado</th><th>Casa</th><th>Cuota</th><th>Origen</th><th>Capturada</th><th>Estado</th><th></th></tr></thead><tbody>${body}</tbody></table></details>`;
+  return `<details class="history"><summary>Historial de cuotas (${rows.length})</summary>
+    <p class="cmp-legend">Solo se registra una fila nueva cuando la cuota cambia. "Desde" es cuándo apareció ese valor; "Confirmada", la última vez que se vio igual. <a href="/api/events/${event.id}/history.csv" download>Descargar CSV ⬇</a></p>
+    <table><thead><tr><th>Resultado</th><th>Casa</th><th>Cuota</th><th>Origen</th><th>Desde</th><th>Confirmada</th><th>Estado</th><th></th></tr></thead><tbody>${body}</tbody></table></details>`;
 }
 
 function renderEvent(event) {
@@ -344,10 +350,12 @@ function parseOdds(raw) {
 }
 function saveMessage(result) {
   if (result.alert?.created) return `Alerta generada: ${result.alert.probability_percent.toFixed(2)}% · revisa el reparto en la tarjeta`;
-  const parts = (result.saved || []).map(item => item.is_best
+  const unchanged = (result.saved || []).filter(item => item.changed === false).map(item => item.outcome);
+  const parts = (result.saved || []).filter(item => item.changed !== false).map(item => item.is_best
     ? `${item.outcome} ${item.decimal_odds} es la nueva mejor cuota`
     : `${item.outcome} ${item.decimal_odds} (la mejor sigue siendo ${item.best_bookmaker} ${item.best_odds})`);
-  return `${result.bookmaker} guardada: ${parts.join(' · ')}`;
+  const note = unchanged.length ? `${unchanged.join(', ')} sin cambio (confirmada)` : '';
+  return `${result.bookmaker}: ${[parts.join(' · '), note].filter(Boolean).join(' · ')}`;
 }
 function renderComparison(event) {
   const latest = event.calculation.history.filter(row => row.current);
