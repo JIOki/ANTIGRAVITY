@@ -189,3 +189,26 @@ class SyncTest(ServerBase):
         self.assertEqual(summary["errors"], ["soccer_mexico_ligamx: clave inválida"])
         sub = self.client.request("GET", "/api/integrations")[1]["subscriptions"][0]
         self.assertEqual(sub["last_error"], "clave inválida")
+
+
+class SmartSyncTest(SyncTest):
+    def test_two_fetches_per_game_day_and_estimate(self):
+        self.register()
+        self.subscribe()
+        now = server.utcnow()
+        first = now + timedelta(hours=11)  # primer partido dentro de 12 h
+        cal = [{"id": "a", "commence_time": server.iso(first)}, {"id": "b", "commence_time": server.iso(first + timedelta(hours=2))},
+               {"id": "c", "commence_time": server.iso(first + timedelta(days=2))}]
+        with mock.patch.object(server.PROVIDERS["the-odds-api"], "list_events", return_value=cal, create=True):
+            server.refresh_calendar(now)
+        self.assertEqual(server.smart_tick(now)[0].split(":")[0], "soccer_mexico_ligamx")  # consulta temprana
+        self.assertEqual(server.smart_tick(now + timedelta(minutes=5)), [])                 # no repite
+        self.assertEqual(server.smart_tick(first - timedelta(minutes=70)), [])               # aún no toca la previa
+        self.assertEqual(len(server.smart_tick(first - timedelta(minutes=55))), 1)           # consulta previa
+        self.assertEqual(server.smart_tick(first - timedelta(minutes=50)), [])
+        self.assertEqual(len(self.fetch_calls), 2)
+        with server.open_db() as db:
+            # 2 días con partido en el calendario de 7 días → 2*30/7 días/mes × 2 consultas × 1 crédito
+            self.assertEqual(server.estimated_monthly_credits(db), round(2 * 30 / 7 * 2))
+        info = self.client.request("GET", "/api/integrations")[1]
+        self.assertEqual(info["mode"], "smart")

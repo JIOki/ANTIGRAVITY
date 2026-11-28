@@ -61,6 +61,13 @@ DUMMY_HASH = hashlib.scrypt(b"cuenta-inexistente", salt=DUMMY_SALT, **SCRYPT)
 
 # Integraciones por API
 SYNC_INTERVAL_MINUTES = max(5, int(os.environ.get("ODDS_API_INTERVAL_MINUTES", "120")))
+# Modo "smart": calendario gratis por la mañana y la noche, y 2 consultas de cuotas por liga
+# solo en días con partido (EARLY_HOURS antes y PRE_MINUTES antes del primer partido).
+SYNC_MODE = os.environ.get("ODDS_API_MODE", "smart").lower()
+CALENDAR_HOURS = sorted({int(h) for h in os.environ.get("ODDS_API_CALENDAR_HOURS", "8,20").split(",") if h.strip()})
+EARLY_HOURS = int(os.environ.get("ODDS_API_EARLY_HOURS", "12"))
+PRE_MINUTES = int(os.environ.get("ODDS_API_PRE_MINUTES", "60"))
+LOCAL_TZ = timezone(timedelta(hours=-6))  # Ciudad de México
 SYNC_HORIZON_HOURS = max(1, int(os.environ.get("ODDS_API_HORIZON_HOURS", "72")))
 MANUAL_SYNC_COOLDOWN = timedelta(minutes=2)
 MAX_SUBSCRIPTIONS_PER_USER = 10
@@ -190,6 +197,21 @@ def initialize_db() -> None:
                 provider TEXT NOT NULL,
                 external_id TEXT NOT NULL,
                 PRIMARY KEY(user_id, provider, external_id)
+            );
+            CREATE TABLE IF NOT EXISTS api_schedule (
+                provider TEXT NOT NULL,
+                sport_key TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                commence_time TEXT NOT NULL,
+                PRIMARY KEY(provider, sport_key, external_id)
+            );
+            CREATE TABLE IF NOT EXISTS api_fetch_log (
+                provider TEXT NOT NULL,
+                sport_key TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                day TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY(provider, sport_key, kind, day)
             );
             CREATE TABLE IF NOT EXISTS integration_status (
                 provider TEXT PRIMARY KEY,
@@ -531,23 +553,114 @@ def run_sync(user_id: int | None = None, now: datetime | None = None, sport_key:
         SYNC_LOCK.release()
 
 
-def estimated_monthly_credits(db: sqlite3.Connection) -> int:
-    calls_per_month = 30 * 24 * 60 / SYNC_INTERVAL_MINUTES
-    total = 0
-    for (provider_key, _, regions) in subscription_groups(db):
+def subscribed_sports(db: sqlite3.Connection) -> dict[tuple[str, str], int]:
+    """(proveedor, deporte) -> créditos por consulta (suma de las combinaciones de regiones suscritas)."""
+    result: dict[tuple[str, str], int] = {}
+    for (provider_key, sport_key, regions) in subscription_groups(db):
         provider = PROVIDERS.get(provider_key)
         if provider:
-            total += provider.credits_per_call(list(regions)) * calls_per_month
+            result[(provider_key, sport_key)] = result.get((provider_key, sport_key), 0) + provider.credits_per_call(list(regions))
+    return result
+
+
+def refresh_calendar(now: datetime | None = None) -> dict:
+    """Actualiza el calendario de los deportes suscritos (endpoint gratuito)."""
+    now = now or utcnow()
+    with DB_LOCK, open_db() as db:
+        sports = list(subscribed_sports(db))
+    done, errors = 0, []
+    for provider_key, sport_key in sports:
+        provider = PROVIDERS.get(provider_key)
+        try:
+            events = provider.list_events(sport_key)
+        except ProviderError as exc:
+            errors.append(f"{sport_key}: {exc}")
+            continue
+        with DB_LOCK, open_db() as db:
+            db.execute("DELETE FROM api_schedule WHERE provider=? AND sport_key=?", (provider_key, sport_key))
+            db.executemany("INSERT OR REPLACE INTO api_schedule VALUES(?,?,?,?)",
+                           [(provider_key, sport_key, e["id"], iso(parse_iso(e["commence_time"]))) for e in events])
+        done += 1
+    with DB_LOCK, open_db() as db:
+        db.execute("INSERT INTO integration_status(provider,last_sync_at,last_error) VALUES('calendar',?,'') "
+                   "ON CONFLICT(provider) DO UPDATE SET last_sync_at=excluded.last_sync_at", (iso(now),))
+    return {"sports": done, "errors": errors}
+
+
+def planned_fetches(db: sqlite3.Connection, now: datetime) -> list[dict]:
+    """Consultas de cuotas pendientes: 2 por liga el día de su primer partido próximo."""
+    plans = []
+    for provider_key, sport_key in subscribed_sports(db):
+        row = db.execute("SELECT MIN(commence_time) FROM api_schedule WHERE provider=? AND sport_key=? AND commence_time>?",
+                         (provider_key, sport_key, iso(now))).fetchone()
+        if not row or not row[0]:
+            continue
+        first = parse_iso(row[0])
+        day = first.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
+        done = {r[0] for r in db.execute("SELECT kind FROM api_fetch_log WHERE provider=? AND sport_key=? AND day=?",
+                                         (provider_key, sport_key, day))}
+        for kind, at in (("early", first - timedelta(hours=EARLY_HOURS)), ("pre", first - timedelta(minutes=PRE_MINUTES))):
+            if kind not in done:
+                plans.append({"provider": provider_key, "sport_key": sport_key, "kind": kind, "day": day,
+                              "at": iso(at), "first_game": iso(first)})
+    return sorted(plans, key=lambda p: p["at"])
+
+
+def smart_tick(now: datetime | None = None) -> list[str]:
+    """Ejecuta las consultas de cuotas que ya tocan. Devuelve lo que hizo."""
+    now = now or utcnow()
+    with DB_LOCK, open_db() as db:
+        due = [p for p in planned_fetches(db, now) if parse_iso(p["at"]) <= now]
+    done = []
+    for sport_key in dict.fromkeys(p["sport_key"] for p in due):
+        summary = run_sync(now=now, sport_key=sport_key)
+        if not summary.get("ok"):
+            continue
+        kinds = [p for p in due if p["sport_key"] == sport_key]
+        with DB_LOCK, open_db() as db:
+            # Si la consulta "temprana" llega tarde (ya dentro de la hora previa), cuenta también como "previa".
+            for p in kinds:
+                db.execute("INSERT OR IGNORE INTO api_fetch_log VALUES(?,?,?,?,?)", (p["provider"], sport_key, p["kind"], p["day"], iso(now)))
+        done.append(f"{sport_key}: {','.join(p['kind'] for p in kinds)} ({summary.get('events', 0)} eventos)")
+    return done
+
+
+def estimated_monthly_credits(db: sqlite3.Connection) -> int:
+    if SYNC_MODE != "smart":
+        calls_per_month = 30 * 24 * 60 / SYNC_INTERVAL_MINUTES
+        return round(sum(subscribed_sports(db).values()) * calls_per_month)
+    total = 0.0
+    for (provider_key, sport_key), credits in subscribed_sports(db).items():
+        days = {parse_iso(r[0]).astimezone(LOCAL_TZ).date() for r in db.execute(
+            "SELECT commence_time FROM api_schedule WHERE provider=? AND sport_key=?", (provider_key, sport_key))}
+        game_days = len(days) * 30 / 7 if days else 30  # calendario de 7 días; sin calendario, peor caso
+        total += credits * 2 * min(30, game_days)
     return round(total)
 
 
 def sync_loop(stop: threading.Event) -> None:
-    while not stop.wait(SYNC_INTERVAL_MINUTES * 60):
+    if SYNC_MODE != "smart":
+        while not stop.wait(SYNC_INTERVAL_MINUTES * 60):
+            try:
+                print(f"[sync] {run_sync()}")
+            except Exception as exc:  # el hilo no debe morir por un error inesperado
+                print(f"[sync] error: {exc!r}")
+        return
+    last_calendar = None
+    while True:
         try:
-            summary = run_sync()
-            print(f"[sync] {summary}")
-        except Exception as exc:  # el hilo no debe morir por un error inesperado
+            now = utcnow()
+            local = now.astimezone(LOCAL_TZ)
+            slot = (local.date(), max([h for h in CALENDAR_HOURS if h <= local.hour], default=None))
+            if last_calendar is None or (slot[1] is not None and slot != last_calendar):
+                print(f"[calendario] {refresh_calendar(now)}")
+                last_calendar = slot
+            for line in smart_tick(now):
+                print(f"[cuotas] {line}")
+        except Exception as exc:
             print(f"[sync] error: {exc!r}")
+        if stop.wait(300):
+            return
 
 
 def assistant_user_context(db: sqlite3.Connection, user_id: int) -> str:
@@ -731,6 +844,9 @@ class App(BaseHTTPRequestHandler):
                 reply(self, 200, {"providers": providers, "subscriptions": subscriptions,
                                   "max_age_minutes": settings["max_age_minutes"],
                                   "interval_minutes": SYNC_INTERVAL_MINUTES, "horizon_hours": SYNC_HORIZON_HOURS,
+                                  "mode": SYNC_MODE, "calendar_hours": CALENDAR_HOURS, "early_hours": EARLY_HOURS,
+                                  "pre_minutes": PRE_MINUTES, "next_fetches": planned_fetches(db, utcnow())[:6],
+                                  "calendar_at": (db.execute("SELECT last_sync_at FROM integration_status WHERE provider='calendar'").fetchone() or [""])[0],
                                   "estimated_monthly_credits": estimated_monthly_credits(db)})
                 return
         match = HISTORY_CSV_PATH.match(path)
@@ -1100,6 +1216,6 @@ if __name__ == "__main__":
     configured = [p.title for p in PROVIDERS.values() if p.configured]
     if configured:
         threading.Thread(target=sync_loop, args=(threading.Event(),), daemon=True).start()
-        print(f"Sincronización automática con {', '.join(configured)} cada {SYNC_INTERVAL_MINUTES} min.")
+        print(f"Sincronización automática con {', '.join(configured)} en modo {SYNC_MODE}.")
     print(f"Cuotas MVP disponible en http://{HOST}:{PORT}")
     server.serve_forever()
