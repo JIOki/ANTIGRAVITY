@@ -69,7 +69,7 @@ class ServerBase(unittest.TestCase):
     def age_odds(self, minutes):
         with sqlite3.connect(server.DB_PATH) as db:
             old = server.iso(server.utcnow() - timedelta(minutes=minutes))
-            db.execute("UPDATE odds SET observed_at=?", (old,))
+            db.execute("UPDATE odds SET observed_at=?, confirmed_at=?", (old, old))
 
     def calc(self, index=0):
         status, data = self.client.request("GET", "/api/events")

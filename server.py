@@ -1,7 +1,9 @@
 """Local MVP for user-owned odds capture and underround alerts."""
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import hmac
 import json
 import os
@@ -68,6 +70,7 @@ LAST_MANUAL_SYNC: dict[int, datetime] = {}
 EVENT_PATH = re.compile(r"^/api/events/(\d+)$")
 ODDS_PATH = re.compile(r"^/api/events/(\d+)/odds$")
 ODDS_ITEM_PATH = re.compile(r"^/api/events/(\d+)/odds/(\d+)$")
+HISTORY_CSV_PATH = re.compile(r"^/api/events/(\d+)/history\.csv$")
 STAKES_PATH = re.compile(r"^/api/events/(\d+)/stakes$")
 SPORTS_PATH = re.compile(r"^/api/integrations/([a-z0-9-]+)/sports$")
 SUBSCRIPTION_PATH = re.compile(r"^/api/integrations/subscriptions/(\d+)$")
@@ -216,6 +219,11 @@ def initialize_db() -> None:
         odds_columns = {row["name"] for row in db.execute("PRAGMA table_info(odds)")}
         if "source" not in odds_columns:
             db.execute("ALTER TABLE odds ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+        if "confirmed_at" not in odds_columns:
+            # observed_at = cuándo apareció ese valor; confirmed_at = última vez que se vio igual.
+            db.execute("ALTER TABLE odds ADD COLUMN confirmed_at TEXT")
+        db.execute("UPDATE odds SET confirmed_at=observed_at WHERE confirmed_at IS NULL")
+        db.execute("CREATE INDEX IF NOT EXISTS odds_latest_idx ON odds(event_id, outcome, observed_at)")
 
 
 # ---------------------------------------------------------------- sesiones
@@ -292,20 +300,39 @@ def send_alert_email(recipient: str, subject: str, body: str) -> tuple[bool, str
 
 # ------------------------------------------------------------------ cálculo
 
+def record_quote(db: sqlite3.Connection, event_id: int, outcome: str, bookmaker: str, decimal_odds: float,
+                 source: str, stamp: str) -> bool:
+    """Registra una cuota solo si cambió respecto a la última de esa casa; si es igual, actualiza su confirmación.
+
+    Devuelve True si se creó un registro nuevo en el historial.
+    """
+    latest = db.execute("SELECT id, decimal_odds FROM odds WHERE event_id=? AND outcome=? "
+                        "AND lower(trim(bookmaker))=lower(trim(?)) ORDER BY observed_at DESC, id DESC LIMIT 1",
+                        (event_id, outcome, bookmaker)).fetchone()
+    if latest and abs(latest["decimal_odds"] - decimal_odds) < 1e-9:
+        db.execute("UPDATE odds SET confirmed_at=? WHERE id=?", (stamp, latest["id"]))
+        return False
+    db.execute("INSERT INTO odds(event_id,outcome,bookmaker,decimal_odds,observed_at,confirmed_at,source) VALUES(?,?,?,?,?,?,?)",
+               (event_id, outcome, bookmaker[:120], decimal_odds, stamp, stamp, source))
+    return True
+
+
 def market_calculation(db: sqlite3.Connection, event: sqlite3.Row, threshold: float, max_age_minutes: int,
                        now: datetime | None = None) -> dict:
     """Usa solo la observación más reciente de cada casa por resultado y descarta las vencidas."""
     now = now or utcnow()
     max_age = timedelta(minutes=max_age_minutes)
     outcomes = json.loads(event["outcomes"])
-    rows = db.execute("SELECT id, outcome, bookmaker, decimal_odds, observed_at, source FROM odds WHERE event_id=? "
+    rows = db.execute("SELECT id, outcome, bookmaker, decimal_odds, observed_at, COALESCE(confirmed_at, observed_at) AS confirmed_at, "
+                      "source FROM odds WHERE event_id=? "
                       "ORDER BY observed_at DESC, id DESC", (event["id"],)).fetchall()
     history = []
     latest: dict[tuple[str, str], dict] = {}
     for row in rows:
         item = dict(row)
         key = (item["outcome"], item["bookmaker"].strip().casefold())
-        item["age_minutes"] = max(0.0, (now - parse_iso(item["observed_at"])).total_seconds() / 60)
+        # La vigencia cuenta desde la última confirmación del valor.
+        item["age_minutes"] = max(0.0, (now - parse_iso(item["confirmed_at"])).total_seconds() / 60)
         item["fresh"] = item["age_minutes"] <= max_age_minutes
         item["current"] = key not in latest  # la más reciente de esa casa para ese resultado
         if item["current"]:
@@ -325,7 +352,7 @@ def market_calculation(db: sqlite3.Connection, event: sqlite3.Row, threshold: fl
     complete = all(outcome in best for outcome in outcomes)
     probability_sum = sum(1 / best[outcome]["decimal_odds"] for outcome in outcomes) if complete else None
     qualifies = complete and probability_sum <= threshold + 1e-12
-    oldest = min((parse_iso(q["observed_at"]) for q in best.values()), default=None)
+    oldest = min((parse_iso(q["confirmed_at"]) for q in best.values()), default=None)
     return {
         "outcomes": outcomes,
         "best_odds": best,
@@ -424,13 +451,14 @@ def import_provider_events(db: sqlite3.Connection, provider_key: str, user_id: i
         if item.external_id in dismissed:
             continue
         try:
-            if parse_iso(item.starts_at) <= now:
-                continue  # solo eventos por comenzar; las cuotas en vivo cambian demasiado rápido para este intervalo
+            started = parse_iso(item.starts_at) <= now
         except ValueError:
-            pass
+            started = False
         outcomes_json = json.dumps(item.outcomes, ensure_ascii=False)
         event = db.execute("SELECT * FROM events WHERE user_id=? AND source=? AND external_id=?",
                            (user_id, provider_key, item.external_id)).fetchone()
+        if event is None and started:
+            continue  # no se crean partidos ya iniciados; los que ya seguimos se actualizan en vivo hasta que terminan
         if event is None:
             cursor = db.execute("INSERT INTO events(user_id,name,sport,market,starts_at,outcomes,source,external_id) VALUES(?,?,?,?,?,?,?,?)",
                                 (user_id, item.name[:160], item.sport[:80], item.market[:120], item.starts_at[:60], outcomes_json, provider_key, item.external_id))
@@ -443,15 +471,7 @@ def import_provider_events(db: sqlite3.Connection, provider_key: str, user_id: i
             db.execute(f"DELETE FROM odds WHERE event_id=? AND outcome NOT IN ({placeholders})", (event_id, *item.outcomes))
         imported_events += 1
         for quote in item.quotes:
-            latest = db.execute("SELECT id, decimal_odds FROM odds WHERE event_id=? AND outcome=? AND source=? "
-                                "AND lower(trim(bookmaker))=lower(trim(?)) ORDER BY observed_at DESC, id DESC LIMIT 1",
-                                (event_id, quote.outcome, provider_key, quote.bookmaker)).fetchone()
-            if latest and abs(latest["decimal_odds"] - quote.decimal_odds) < 1e-9:
-                # Misma cuota: se confirma que sigue vigente sin duplicar el historial.
-                db.execute("UPDATE odds SET observed_at=? WHERE id=?", (stamp, latest["id"]))
-            else:
-                db.execute("INSERT INTO odds(event_id,outcome,bookmaker,decimal_odds,observed_at,source) VALUES(?,?,?,?,?,?)",
-                           (event_id, quote.outcome, quote.bookmaker[:120], quote.decimal_odds, stamp, provider_key))
+            record_quote(db, event_id, quote.outcome, quote.bookmaker, quote.decimal_odds, provider_key, stamp)
             imported_quotes += 1
         event = db.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
         pending = evaluate_alert(db, user_id, event)
@@ -460,7 +480,7 @@ def import_provider_events(db: sqlite3.Connection, provider_key: str, user_id: i
     return imported_events, imported_quotes, alerts
 
 
-def run_sync(user_id: int | None = None, now: datetime | None = None) -> dict:
+def run_sync(user_id: int | None = None, now: datetime | None = None, sport_key: str | None = None) -> dict:
     """Consulta los proveedores para las suscripciones (de todos o de un usuario) e importa las cuotas."""
     if not SYNC_LOCK.acquire(blocking=False):
         return {"ok": False, "error": "Ya hay una sincronización en curso."}
@@ -468,6 +488,8 @@ def run_sync(user_id: int | None = None, now: datetime | None = None) -> dict:
         now = now or utcnow()
         with DB_LOCK, open_db() as db:
             groups = subscription_groups(db, user_id)
+            if sport_key:  # sincronizar solo un deporte gasta menos créditos
+                groups = {key: ids for key, ids in groups.items() if key[1] == sport_key}
             owners = {row["id"]: row["user_id"] for row in db.execute("SELECT id, user_id FROM api_subscriptions")}
         summary = {"ok": True, "calls": 0, "events": 0, "quotes": 0, "alerts": 0, "errors": []}
         pending_alerts = []
@@ -711,6 +733,10 @@ class App(BaseHTTPRequestHandler):
                                   "interval_minutes": SYNC_INTERVAL_MINUTES, "horizon_hours": SYNC_HORIZON_HOURS,
                                   "estimated_monthly_credits": estimated_monthly_credits(db)})
                 return
+        match = HISTORY_CSV_PATH.match(path)
+        if match:
+            self.history_csv(int(match.group(1)), user_id)
+            return
         match = STAKES_PATH.match(path)
         if match:
             query = parse_qs(urlparse(self.path).query)
@@ -780,7 +806,8 @@ class App(BaseHTTPRequestHandler):
             if last and utcnow() - last < MANUAL_SYNC_COOLDOWN:
                 raise RequestError(429, "Espera un par de minutos entre sincronizaciones manuales para cuidar tus créditos.")
             LAST_MANUAL_SYNC[user_id] = utcnow()
-            summary = run_sync(user_id)
+            sport_key = str(data.get("sport_key", "")).strip() or None
+            summary = run_sync(user_id, sport_key=sport_key)
             reply(self, 200 if summary.get("ok") else 409, summary)
             return
         raise RequestError(404, "No encontrado.")
@@ -928,6 +955,37 @@ class App(BaseHTTPRequestHandler):
                        "rounding_step": settings["rounding_step"]}
         reply(self, 200, payload)
 
+    def history_csv(self, event_id: int, user_id: int) -> None:
+        """Historial completo de cuotas del evento en CSV (hora UTC y de Ciudad de México)."""
+        with DB_LOCK, open_db() as db:
+            event = db.execute("SELECT * FROM events WHERE id=? AND user_id=?", (event_id, user_id)).fetchone()
+            if not event:
+                raise RequestError(404, "Evento no encontrado.")
+            rows = db.execute("SELECT outcome, bookmaker, decimal_odds, source, observed_at, COALESCE(confirmed_at, observed_at) AS confirmed_at "
+                              "FROM odds WHERE event_id=? ORDER BY observed_at, id", (event_id,)).fetchall()
+        mexico = timezone(timedelta(hours=-6))  # Ciudad de México no usa horario de verano desde 2022
+
+        def local(value: str) -> str:
+            return parse_iso(value).astimezone(mexico).strftime("%Y-%m-%d %H:%M:%S")
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["evento", "mercado", "inicio_partido", "resultado", "casa", "cuota_decimal", "origen",
+                         "desde_cdmx", "confirmada_cdmx", "desde_utc", "confirmada_utc"])
+        for row in rows:
+            writer.writerow([event["name"], event["market"], event["starts_at"], row["outcome"], row["bookmaker"],
+                             row["decimal_odds"], "manual" if row["source"] == "manual" else "api",
+                             local(row["observed_at"]), local(row["confirmed_at"]), row["observed_at"], row["confirmed_at"]])
+        body = ("\ufeff" + buffer.getvalue()).encode("utf-8")  # BOM para que Excel respete acentos
+        filename = re.sub(r"[^A-Za-z0-9_-]+", "_", event["name"]).strip("_")[:60] or "evento"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="historial_{filename}.csv"')
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def assistant_chat(self, data: dict) -> None:
         question = str(data.get("message", "")).strip()
         if not question:
@@ -1012,15 +1070,14 @@ class App(BaseHTTPRequestHandler):
             if invalid:
                 raise RequestError(400, f"El resultado no pertenece a este mercado: {', '.join(invalid)}.")
             stamp = iso(utcnow())
-            db.executemany("INSERT INTO odds(event_id,outcome,bookmaker,decimal_odds,observed_at,source) VALUES(?,?,?,?,?,'manual')",
-                           [(event_id, o, bookmaker, q, stamp) for o, q in quotes])
+            changed = {o: record_quote(db, event_id, o, bookmaker, q, "manual", stamp) for o, q in quotes}
             settings = user_settings(db, user_id)
             calc = market_calculation(db, event, settings["threshold"], settings["max_age_minutes"])
             comparison = []
             for outcome, odds in quotes:
                 best = calc["best_odds"].get(outcome)
                 comparison.append({
-                    "outcome": outcome, "decimal_odds": odds,
+                    "outcome": outcome, "decimal_odds": odds, "changed": changed[outcome],
                     "is_best": bool(best and best["bookmaker"].strip().casefold() == bookmaker.casefold()
                                     and abs(best["decimal_odds"] - odds) < 1e-9),
                     "best_bookmaker": best["bookmaker"] if best else None,

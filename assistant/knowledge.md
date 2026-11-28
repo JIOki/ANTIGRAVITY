@@ -51,7 +51,7 @@ acciones: ir_eventos, explicar_calculo
 - De cada casa solo cuenta la captura más reciente por resultado; las anteriores quedan como "Reemplazada". La casa se reconoce sin importar mayúsculas ni espacios.
 - Una cuota más antigua que tu vigencia (60 minutos por defecto) queda "Vencida" y se ignora en el cálculo; hay que volver a capturarla.
 - El panel indica hasta qué hora es válido el cálculo y cuántas cuotas vencidas se ignoraron.
-- En el "Historial de capturas" de cada evento ves todas las capturas con su origen (manual o API) y puedes eliminar cualquiera.
+- En el "Historial de cuotas" de cada evento ves cada valor con su origen (manual o API), cuándo apareció ("Desde") y la última vez que se confirmó igual ("Confirmada"). Solo se registra una fila nueva cuando la cuota cambia. Se puede descargar en CSV para analizarlo.
 acciones: ir_eventos, ir_ajustes
 
 ## Eventos y mercados
