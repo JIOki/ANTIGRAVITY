@@ -122,6 +122,16 @@ class TheOddsAPI(OddsProvider):
         self._sports_cache = (time.monotonic(), sports)
         return sports
 
+    def list_events(self, sport_key: str, hours: int = 168) -> list[dict]:
+        """Calendario de partidos sin cuotas: no consume créditos."""
+        until = datetime.now(timezone.utc) + timedelta(hours=hours)
+        data, _ = self._get(f"/sports/{quote(sport_key, safe='')}/events/",
+                            {"dateFormat": "iso", "commenceTimeTo": until.strftime("%Y-%m-%dT%H:%M:%SZ")})
+        if not isinstance(data, list):
+            raise ProviderError(f"{self.title} devolvió un calendario inesperado.")
+        return [{"id": str(e["id"]), "commence_time": str(e["commence_time"])} for e in data
+                if isinstance(e, dict) and e.get("id") and e.get("commence_time")]
+
     def fetch_odds(self, sport_key: str, regions: list[str], horizon_hours: int) -> FetchResult:
         bad = [r for r in regions if r not in self.regions]
         if bad or not regions:

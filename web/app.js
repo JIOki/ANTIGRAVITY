@@ -239,11 +239,16 @@ async function loadIntegrations() {
     const remaining = st.requests_remaining ?? null;
     const estimate = integrations.estimated_monthly_credits;
     const tight = remaining !== null && estimate > remaining;
-    status.className = `integration-status${st.last_error || tight || integrations.max_age_minutes < integrations.interval_minutes ? ' warn' : ''}`;
-    status.innerHTML = `<strong>${esc(provider.title)}</strong> · sincronización automática cada ${integrations.interval_minutes} min, eventos de las próximas ${integrations.horizon_hours} h.<br>
+    const smart = integrations.mode === 'smart';
+    status.className = `integration-status${st.last_error || tight || (!smart && integrations.max_age_minutes < integrations.interval_minutes) ? ' warn' : ''}`;
+    const nombres = Object.fromEntries(integrations.subscriptions.map(x => [x.sport_key, x.sport_title]));
+    const proximas = (integrations.next_fetches || []).slice(0, 4).map(f => `${esc(nombres[f.sport_key] || f.sport_key)} ${fmtDate(f.at)}`).join(' · ');
+    status.innerHTML = `<strong>${esc(provider.title)}</strong> · ${smart
+      ? `calendario gratis a las ${integrations.calendar_hours.map(h => h + ':00').join(' y ')} (último: ${fmtDate(integrations.calendar_at)}) · 2 consultas por liga en días con partido: ${integrations.early_hours} h y ${integrations.pre_minutes} min antes del primero.<br>Próximas consultas: ${proximas || 'ninguna programada'}`
+      : `sincronización automática cada ${integrations.interval_minutes} min`}, eventos de las próximas ${integrations.horizon_hours} h.<br>
       Última sincronización: ${fmtDate(st.last_sync_at)} · Créditos restantes: ${remaining ?? '—'} · Consumo estimado: ~${estimate.toLocaleString('es-MX')} créditos/mes${tight ? ' (supera tus créditos restantes: sigue menos deportes/regiones o sube ODDS_API_INTERVAL_MINUTES)' : ''}
       ${st.last_error ? `<br>Último error: ${esc(st.last_error)}` : ''}
-      ${integrations.max_age_minutes < integrations.interval_minutes ? `<br><strong>Atención:</strong> tu vigencia de cuotas (${integrations.max_age_minutes} min) es menor que el intervalo de sincronización (${integrations.interval_minutes} min), así que las cuotas de la API se marcarán como vencidas entre una sincronización y otra. Sube la vigencia a ${integrations.interval_minutes} min o más, o reduce <code>ODDS_API_INTERVAL_MINUTES</code> (consume más créditos).` : ''}`;
+      ${!smart && integrations.max_age_minutes < integrations.interval_minutes ? `<br><strong>Atención:</strong> tu vigencia de cuotas (${integrations.max_age_minutes} min) es menor que el intervalo de sincronización (${integrations.interval_minutes} min), así que las cuotas de la API se marcarán como vencidas entre una sincronización y otra. Sube la vigencia a ${integrations.interval_minutes} min o más, o reduce <code>ODDS_API_INTERVAL_MINUTES</code> (consume más créditos).` : ''}`;
   }
   form.querySelectorAll('select, input, button').forEach(el => { el.disabled = !provider.configured; });
   $('#sync-now').disabled = !provider.configured || !integrations.subscriptions.length;
